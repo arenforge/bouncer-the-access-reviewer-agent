@@ -330,8 +330,8 @@ docker rm -f bouncer-reader bouncer-revoker
 - [x] Docker Desktop running; `docker compose up -d` succeeds; seed verified against the answer key
 - [x] Both MCP containers running (with `--sse-host=0.0.0.0`)
 - [x] Dry-run pattern verified with psql (`BEGIN … ROLLBACK` leaves the DB unchanged)
-- [ ] TrueForge restarted with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'`
-- [ ] MCP servers registered in TrueForge (revoker marked Shielded, `@all`)
+- [x] TrueForge restarted with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'`
+- [x] MCP servers registered in TrueForge; agent `bouncer` created with reader (no approval) and revoker (Shielded, `@all`)
 - [x] Agent instructions written in `agent/instructions.md`
 - [ ] Instructions pasted into TrueForge
 - [ ] First full end-to-end run

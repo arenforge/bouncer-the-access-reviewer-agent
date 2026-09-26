@@ -56,4 +56,4 @@ In **Build Agent → MCP Servers → Select MCP Tools**, add both servers. For `
 { "name": "bouncer-revoker", "require_approval_for_tools": ["@all"] }
 ```
 
-The default is `["@destructive"]`, which isn't enough: a `REVOKE` sent through `execute_sql` might not be classed as destructive. `@all` guarantees the harness pauses before every revoker call.
+The default is `["@destructive"]`, which isn't enough: postgres-mcp's tools carry no annotations, so `execute_sql` is never classed as destructive and would run without a pause. `@all` guarantees the harness pauses before every revoker call.
