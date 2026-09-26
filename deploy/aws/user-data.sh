@@ -43,6 +43,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# No SSH: access is only through Systems Manager
+systemctl disable --now ssh.socket ssh.service || true
+
 systemctl daemon-reload
 systemctl enable --now trueforge
 
