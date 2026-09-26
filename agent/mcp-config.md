@@ -9,17 +9,7 @@ Two instances of [crystaldba/postgres-mcp](https://hub.docker.com/r/crystaldba/p
 
 ## 1. Start the containers
 
-The DB must be up first (`docker compose up -d`, host port **5433**).
-
-```
-docker run -d --name bouncer-reader -p 8000:8000 \
-  -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company \
-  crystaldba/postgres-mcp --access-mode=restricted --transport=sse --sse-host=0.0.0.0
-
-docker run -d --name bouncer-revoker -p 8001:8000 \
-  -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company \
-  crystaldba/postgres-mcp --access-mode=unrestricted --transport=sse --sse-host=0.0.0.0
-```
+`docker compose up -d` starts the DB and both MCP servers. They are defined in `docker-compose.yml`, reach the DB over the compose network (`db:5432`), and publish only on `127.0.0.1`.
 
 Gotchas we hit:
 - postgres-mcp only supports `stdio` and `sse` (no streamable HTTP), so we use SSE.
@@ -38,7 +28,7 @@ Everything else stays blocked. Standalone TrueForge only listens on localhost.
 
 ## 3. Register the servers
 
-UI: **Settings → Connectors → add remote server**. Or with the API:
+Easiest: `./scripts/setup-trueforge.sh` does steps 3 and 4. Manually, UI: **Settings → Connectors → add remote server**. Or with the API:
 
 ```
 curl -X POST http://localhost:8790/api/v1/settings/mcp-servers -H 'content-type: application/json' \

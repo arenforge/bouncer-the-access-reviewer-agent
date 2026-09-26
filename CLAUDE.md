@@ -282,18 +282,13 @@ docker pull crystaldba/postgres-mcp
 brew install libpq && brew link --force libpq
 ```
 
-### Start
+### Start (any laptop)
 ```
-cd ~/Desktop/bouncer/bouncer-the-access-reviewer-agent
-docker compose up -d
-docker exec -it bouncer-db psql -U postgres -d company -c "\du"
-docker exec -it bouncer-db psql -U postgres -d company -c "SELECT * FROM governance.hr_roster;"
-
-docker run -d --name bouncer-reader -p 8000:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company crystaldba/postgres-mcp --access-mode=restricted --transport=sse --sse-host=0.0.0.0
-
-docker run -d --name bouncer-revoker -p 8001:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company crystaldba/postgres-mcp --access-mode=unrestricted --transport=sse --sse-host=0.0.0.0
-
-docker ps
+cd ~/Desktop/bouncer/bouncer-the-access-reviewer-agent   # or wherever you cloned it
+docker compose up -d                                      # DB + reader + revoker, all on 127.0.0.1
+OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge   # separate terminal
+# In TrueForge Settings, add a model provider with YOUR OWN API key (first time only)
+./scripts/setup-trueforge.sh                              # registers MCP servers, creates/updates the bouncer agent
 ```
 Register in TrueForge: reader at `http://localhost:8000/sse`, and revoker at `http://localhost:8001/sse` (**Shielded**). postgres-mcp only supports `stdio` and `sse`, so SSE it is. `--sse-host=0.0.0.0` is required, or the server binds to localhost inside the container and is unreachable. TrueForge must be started with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'` or it rejects localhost MCP URLs. Full steps: `agent/mcp-config.md`.
 
@@ -301,8 +296,8 @@ Register in TrueForge: reader at `http://localhost:8000/sse`, and revoker at `ht
 ```
 docker logs bouncer-db | bouncer-reader | bouncer-revoker
 docker compose down -v && docker compose up -d        # reset DB after seed changes
-docker restart bouncer-reader bouncer-revoker          # after a DB reset
-docker rm -f bouncer-reader                            # recreate an MCP container
+docker compose restart reader revoker                  # after a DB reset
+docker compose up -d --force-recreate reader            # recreate an MCP container
 docker exec -it bouncer-db psql -U postgres -d company # DB shell (\q to exit)
 ```
 
@@ -319,7 +314,6 @@ SQL
 ### Stop
 ```
 docker compose down
-docker rm -f bouncer-reader bouncer-revoker
 ```
 
 ## 10. Current status (as of the morning of 26 Sep)

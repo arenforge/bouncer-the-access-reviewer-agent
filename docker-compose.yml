@@ -7,6 +7,37 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: company
     ports:
-      - "5433:5432" # 5433 on the host so it never clashes with a local Postgres on 5432
+      # Localhost only, and 5433 so it never clashes with a local Postgres on 5432
+      - "127.0.0.1:5433:5432"
     volumes:
       - ./db/seed.sql:/docker-entrypoint-initdb.d/seed.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "company"]
+      interval: 2s
+      retries: 30
+
+  # Read-only MCP server: the agent investigates through this one
+  reader:
+    image: crystaldba/postgres-mcp
+    container_name: bouncer-reader
+    environment:
+      DATABASE_URI: postgresql://postgres:postgres@db:5432/company
+    command: ["--access-mode=restricted", "--transport=sse", "--sse-host=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Write MCP server: shielded in TrueForge, used only after human approval
+  revoker:
+    image: crystaldba/postgres-mcp
+    container_name: bouncer-revoker
+    environment:
+      DATABASE_URI: postgresql://postgres:postgres@db:5432/company
+    command: ["--access-mode=unrestricted", "--transport=sse", "--sse-host=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
