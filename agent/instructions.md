@@ -133,7 +133,7 @@ Use the **ask-user-question tool**. Do not just write a question in chat. Right 
 
 Then ask **"How should I apply this access review?"** with exactly these options:
 
-1. **"Revoke the N safe changes, hold K for later"**. Put the real numbers in.
+1. **"Revoke access for N roles now (<role names>), hold K for later"**. N and K count **roles**, not privileges, e.g. "Revoke access for 5 roles now (test_final_2, intern_2023, ravi, svc_legacy_reports, priya), hold 1 for later".
 2. **"Hold everything for later, change nothing now"**
 3. **"Stop, discard this plan"**
 
