@@ -19,7 +19,7 @@ your laptop ──(AWS SSM tunnel, IAM-authenticated)──▶ EC2 (no inbound p
 ## Steps
 
 ```bash
-./deploy/aws/deploy.sh          # creates the instance (default: t3.medium in ap-south-1, about $1/day)
+./deploy/aws/deploy.sh          # creates the instance (default: m7i-flex.large in ap-south-1; Free Tier eligible)
 ./deploy/aws/status.sh          # wait until "setup: done" and "trueforge api: up" (about 5–8 min)
 ./deploy/aws/connect.sh         # keep running; open http://localhost:8790
 ```

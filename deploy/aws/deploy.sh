@@ -2,11 +2,11 @@
 # Creates the Bouncer EC2 instance. No inbound ports, no SSH key: access is only via
 # AWS Systems Manager (see connect.sh). Safe to re-run: it reuses the role and security group.
 #
-#   AWS_REGION=ap-south-1 INSTANCE_TYPE=t3.medium ./deploy/aws/deploy.sh
+#   AWS_REGION=ap-south-1 INSTANCE_TYPE=m7i-flex.large ./deploy/aws/deploy.sh
 set -euo pipefail
 
 REGION="${AWS_REGION:-ap-south-1}"
-TYPE="${INSTANCE_TYPE:-t3.medium}"
+TYPE="${INSTANCE_TYPE:-m7i-flex.large}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROLE=bouncer-ssm-role
 PROFILE=bouncer-ssm-profile
