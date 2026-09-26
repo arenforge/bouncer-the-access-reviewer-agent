@@ -1,105 +1,197 @@
 # Bouncer: The Access Reviewer Agent
 
-> My AI agent's job: kick people out. Its most important skill: not doing it.
+> **My AI agent's job: kick people out. Its most important skill: not doing it.**
 
-Bouncer is an agent that reviews database access and finds access that may no longer be needed.
+Bouncer is an AI agent that reviews database access and finds permissions that may no longer be needed.
 
-The important part is that Bouncer does not follow one simple rule like:
+The important part is that Bouncer does **not** use a simple rule like:
 
 ```text
-unused for 90 days = revoke
+unused for 90 days → revoke
 ```
 
-Instead, it first flags suspicious access, checks the reason behind the flag, looks at the exact permissions, checks service dependencies and possible blast radius, and then prepares a safe action plan.
+Instead, it investigates the reason behind the access, checks ownership and usage, looks for service dependencies, considers the possible blast radius, prepares a least-privilege cleanup plan, and then stops before the destructive action.
 
-Before any real access is removed, Bouncer stops and asks a human for approval.
+A human must approve the actual revoke.
 
 ---
 
-## The Problem
+# The Problem
 
-Database access can stay behind even when it is no longer needed.
+Database access becomes difficult to manage over time.
+
+People leave companies. Old roles stay behind. Service accounts may lose their owners. Some permissions are never used. Other permissions may look stale but are still required by an important scheduled job.
+
+A simple cleanup script can therefore remove something that a real service still needs.
 
 For example:
 
-- An employee may have left the company but still have database access.
-- A database role may not belong to anyone in the HR roster.
-- A superuser role may be unowned.
-- A service account may belong to an employee who has already left.
-- A permission may not have been used for a long time.
-- A permission may never have been used.
+```text
+91 days unused
+       ↓
+Looks stale
+       ↓
+But a quarterly payment job depends on it
+       ↓
+Removing it could break the job
+```
 
-But removing access automatically can also cause problems.
+Bouncer is designed around this problem.
 
-A service account may look unused while an important scheduled job still depends on it.
-
-So the real problem is not only:
-
-> "Which access looks old?"
-
-It is:
-
-> "Which access needs review, and is it actually safe to remove?"
-
-That is what Bouncer is built to handle.
+It separates **finding suspicious access** from **deciding what should actually happen**.
 
 ---
 
-## What Bouncer Does
+# What Bouncer Does
 
-Bouncer works in two stages.
+Bouncer follows this general flow:
 
-### Stage 1: Flagging
+```text
+┌───────────────────────┐
+│   PostgreSQL Access   │
+│ roles + grants + DB   │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│     Read the Context  │
+│ HR + usage + ownership│
+│ + service dependencies│
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│    Flag for Review    │
+│      6 rules          │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Investigate Further  │
+│ permissions + owner   │
+│ + dependencies        │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│   KEEP / REVOKE /     │
+│        HOLD           │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Revoke Plan + SQL    │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Sandbox Safety Check │
+│  lint + simulation    │
+└───────────┬───────────┘
+            │
+            ▼
+       ┌──────────┐
+       │   STOP   │
+       └────┬─────┘
+            │
+            ▼
+┌───────────────────────┐
+│   Human Approval      │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Shielded Revoker MCP │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Verify Final State   │
+│     using Reader     │
+└───────────────────────┘
+```
 
-Bouncer applies six rules to find database access that needs review.
+The main idea is simple:
 
-### Stage 2: Decision
+> **Bouncer can recommend a revoke, but it cannot complete the destructive action without human approval.**
 
-After something is flagged, Bouncer checks the complete context and classifies it as:
+---
 
-- **KEEP**
-- **REVOKE**
-- **HOLD**
+# Flagging Is Not Revoking
 
-A flag does **not** automatically mean revoke.
+This is one of the most important parts of the design.
 
-This distinction is important because stale or unused access can still be required by another service.
+Bouncer has two separate stages.
+
+## Stage 1 — Flagging
+
+The agent applies six rules to find access that needs review.
+
+A flag means:
+
+> "Look at this access more carefully."
+
+It does **not** automatically mean:
+
+> "Revoke this access."
+
+## Stage 2 — Decision
+
+After flagging, Bouncer checks the complete context and decides whether the access should be:
+
+```text
+KEEP
+
+REVOKE
+
+HOLD
+```
+
+This prevents the six rules from becoming six automatic revoke rules.
 
 ---
 
 # How Bouncer Flags Access
 
-Bouncer currently uses six flagging rules.
-
-## 1. Left the Company
+## Rule 1 — Employee Left the Company
 
 ```text
 employment_status == 'left'
 ```
 
-If a person is marked as `left` in the HR roster, their database grants are flagged for review.
+If a person has left the company, their database grants are flagged for review.
 
-Examples:
+The person does **not** need to have been gone for 90 days.
 
-- `intern_2023`
-- `ravi`
+For example:
 
-An employee does not need to be gone for 90 days for this rule to trigger.
+```text
+Employee left 1 month ago
+        ↓
+Rule 1 flags the access
+        ↓
+Review permissions
+        ↓
+Check dependencies
+        ↓
+Create decision
+```
 
-For example, if someone left one month ago, Rule 1 can still flag their database access.
-
-The 90-day condition belongs to the stale-access rule, not the employee-left rule.
+The 90-day condition belongs to the stale-access rule, not this rule.
 
 ---
 
-## 2. Unowned Superuser
+## Rule 2 — Unowned Superuser
+
+A role is flagged when:
 
 ```text
-rolsuper == True
-AND role is not in the HR roster
+rolsuper == true
 ```
 
-This rule looks for PostgreSQL roles that have superuser status but do not have a matching person in the HR roster.
+and the role is not present in the HR roster.
+
+A superuser without a known owner is especially important because it has very high database privileges.
 
 Example:
 
@@ -107,198 +199,165 @@ Example:
 test_final_2
 ```
 
-A superuser role has much broader database privileges, so an unowned superuser role needs review.
+It is a superuser, has no usage rows, and is not in the HR roster.
 
 ---
 
-## 3. Unowned Role
+## Rule 3 — Unowned Role
 
-This rule checks whether a database role has no matching entry in the HR roster.
+A database role is flagged when it cannot be matched to the HR roster.
 
-```text
-role not in roster
-```
-
-In the current demo data, the main example is:
-
-```text
-test_final_2
-```
-
-It is also caught by the unowned-superuser rule.
+The purpose is to find database access that has no known human owner.
 
 ---
 
-## 4. Orphaned Service Account
+## Rule 4 — Orphaned Service Account
 
-A service account can belong to a person even though the account itself is not an employee account.
+A service account is flagged when its owner has left the company.
 
-Bouncer checks the owner of the service account against the HR roster.
-
-If the account is a service account and its owner has left, it is flagged.
-
-Example:
+For example:
 
 ```text
 svc_legacy_reports
-        |
-        └── owner = ravi
+        ↓
+Owner = ravi
+        ↓
+Ravi has left
+        ↓
+Service account becomes orphaned
 ```
 
-Ravi has left the company, so the service account is considered orphaned and is flagged for review.
+The service account is then investigated separately.
 
 ---
 
-## 5. Stale Access
+## Rule 5 — Stale Access
 
-Bouncer also checks when access was last used.
-
-The stale rule is:
+Access is flagged when it has not been used for more than 90 days.
 
 ```text
 (today - last_used).days > 90
 ```
 
-For the demo:
+This is only a **flagging rule**.
 
-```text
-today = 2026-09-26
-```
+It does not automatically mean the permission should be revoked.
 
-Examples from the demo data:
-
-| Account | Approx. unused time |
-|---|---:|
-| `intern_2023` | 412–430 days |
-| `ravi` | 205–210 days |
-| `svc_legacy_reports` | 97 days |
-| `svc_payments_sync` | 91 days |
-
-More than 90 days without use is a **stale-access signal**.
-
-It is not an automatic revoke decision.
+A dependency can change the final decision.
 
 ---
 
-## 6. Never Used
+## Rule 6 — Never Used
 
-Bouncer also looks for permissions that have never been used.
-
-The condition is:
-
-```text
-no usage row
-OR
-last_used IS NULL
-```
+Access is flagged when there is no usage record or the last-used value is missing.
 
 Examples:
 
-- Priya's `DELETE` permission on `payments`
-- Unused privileges of `svc_legacy_reports`
-
-Again, this only means that the access needs review.
-
-It does not mean the complete role should automatically be deleted.
-
----
-
-# What Information Bouncer Checks
-
-Bouncer combines information from different parts of the access picture.
-
-### HR Roster
-
-Used to check whether a person is still with the company.
-
-### Database Roles
-
-Used to see which roles exist in PostgreSQL.
-
-### Database Grants
-
-Used to understand exactly what permissions a role has.
-
-Examples include:
-
 ```text
-SELECT
-INSERT
-UPDATE
-DELETE
+No usage row
+
+      OR
+
+last_used IS NULL
 ```
 
-### Superuser Status
-
-Used to identify roles with PostgreSQL superuser privileges.
-
-### Usage History
-
-Used to find when access was last used.
-
-### Never-Used Permissions
-
-Used to identify permissions with no usage record or a `NULL` last-used value.
-
-### Service-Account Ownership
-
-Used to check whether a service account belongs to someone who has left.
-
-### Service Dependencies
-
-Used to check whether another service or scheduled job depends on an account.
-
-### Blast Radius
-
-Used to understand what could be affected if access is removed.
+Again, this means the access needs investigation. It is not automatic proof that the access is unnecessary.
 
 ---
 
 # From Flag to Decision
 
-After an account or permission is flagged, Bouncer does not immediately revoke it.
+After access is flagged, Bouncer looks at the complete context.
 
-It looks at the complete context.
-
-| Decision | Meaning |
-|---|---|
-| **KEEP** | The access appears valid or is still being used. |
-| **REVOKE** | The access is flagged, appears unnecessary, and no blocking dependency was found. |
-| **HOLD** | The access looks suspicious, but removing it may affect a service or needs more review. |
+```text
+             FLAG
+               │
+               ▼
+       ┌─────────────────┐
+       │ Check exact     │
+       │ permissions     │
+       └────────┬────────┘
+                │
+                ▼
+       ┌─────────────────┐
+       │ Check owner and │
+       │ HR status       │
+       └────────┬────────┘
+                │
+                ▼
+       ┌─────────────────┐
+       │ Check usage     │
+       │ history         │
+       └────────┬────────┘
+                │
+                ▼
+       ┌─────────────────┐
+       │ Check service   │
+       │ dependencies    │
+       └────────┬────────┘
+                │
+                ▼
+       ┌─────────────────┐
+       │ Evaluate blast  │
+       │ radius          │
+       └────────┬────────┘
+                │
+           ┌────┼────┐
+           ▼    ▼    ▼
+         KEEP REVOKE HOLD
+```
 
 ### KEEP
 
-Examples:
-
-- `alice`
-- `bob`
-- `svc_etl`
-
-These accounts are active or recently used.
+The access is still needed or the available evidence does not support removing it.
 
 ### REVOKE
 
-Example:
+The specific access is identified as removable.
 
-```text
-ravi
-```
-
-Ravi has left the company and his database access is no longer needed.
+The agent should remove only the necessary privilege when possible.
 
 ### HOLD
 
-Example:
+The access looks suspicious but removing it could cause a problem or needs more review.
+
+The key example is:
 
 ```text
 svc_payments_sync
+        ↓
+91 days unused
+        ↓
+Looks stale
+        ↓
+Critical quarterly job depends on it
+        ↓
+HOLD
 ```
 
-It looks stale, but another important service depends on it.
+---
 
-HOLD is not a failure.
+# What Bouncer Checks
 
-It is a safety decision.
+Bouncer uses multiple pieces of information before creating the final plan.
+
+| Information | Why it matters |
+|---|---|
+| HR roster | Checks whether a person is active or has left |
+| Database roles | Finds roles and accounts |
+| Database grants | Shows exact permissions |
+| Superuser status | Finds high-privilege roles |
+| Usage history | Shows when access was last used |
+| Never-used information | Finds permissions with no usage |
+| Service-account owner | Finds orphaned accounts |
+| Service dependencies | Checks whether a service still depends on access |
+| Blast radius | Helps explain what could be affected by a revoke |
+
+The goal is not to collect more data just for the sake of it.
+
+Each check helps answer one question:
+
+> **"Is this access actually safe to remove?"**
 
 ---
 
@@ -306,526 +365,538 @@ It is a safety decision.
 
 ## `test_final_2`
 
-Facts:
-
-- Superuser
-- No usage rows
-- Not present in the HR roster
-
-Expected decision:
-
 ```text
+SUPERUSER
+No usage rows
+Not in HR roster
+      ↓
+Flagged
+      ↓
 REVOKE
 ```
 
-The demo SQL idea is:
+The final change removes its superuser and login capability:
 
 ```sql
 ALTER ROLE test_final_2 NOSUPERUSER NOLOGIN;
 ```
 
-The important point is that the role is both highly privileged and not owned by anyone in the HR roster.
+This is a high-impact change, so it can only reach the destructive path after human approval.
 
 ---
 
 ## `intern_2023`
 
-Facts:
-
-- Left the company on `2025-07-28`
-- Left around 425 days ago
-- Has `SELECT`, `INSERT`, and `UPDATE` on `payments`
-- Last used around 412–430 days ago
-
-Expected decision:
-
 ```text
-REVOKE
+Left 425 days ago
+SELECT / INSERT / UPDATE on payments
+Last used 412–430 days ago
+        ↓
+REVOKE all database access
 ```
 
 ---
 
 ## `ravi`
 
-Facts:
-
-- Left the company on `2026-03-10`
-- Left around 200 days ago
-- Has `SELECT` access on `customers` and `payments`
-- Last used around 205–210 days ago
-
-Expected decision:
-
 ```text
-REVOKE
+Left 200 days ago
+SELECT on customers and payments
+Last used around 205–210 days ago
+        ↓
+REVOKE all database access
 ```
-
-This is also a good example of why HR status matters separately from the 90-day stale rule.
 
 ---
 
 ## `svc_legacy_reports`
 
-Facts:
-
-- Service account
-- Owner is `ravi`
-- Ravi has left
-- Unused for 97 days
-- No dependencies
-
-Expected decision:
-
 ```text
+Service account
+Owner = ravi
+Ravi has left
+Unused for 97 days
+No dependency found
+        ↓
 REVOKE
 ```
-
-The account is both stale and orphaned, and there is no dependency blocking its removal.
 
 ---
 
 ## `priya`
 
-Facts:
-
-- Active employee
-- Has `DELETE` permission on `payments`
-- The `DELETE` permission was never used
-
-Expected decision:
+This case shows why Bouncer can revoke a **specific permission** instead of removing everything.
 
 ```text
-REVOKE DELETE ONLY
+Active employee
+        ↓
+Has DELETE on payments
+        ↓
+DELETE was never used
+        ↓
+Keep other useful permissions
+        ↓
+REVOKE DELETE only
 ```
 
-Bouncer should not remove all of Priya's database access just because one permission is unused.
-
-This shows why Bouncer looks at the exact permission instead of treating the complete role as one block.
+Her other required access remains.
 
 ---
 
-# The Important Case: `svc_payments_sync`
+## `svc_payments_sync`
 
-This is the main example that shows why Bouncer is not just a 90-day cleanup script.
-
-The account has not been used for 91 days.
-
-So Rule 5 flags it:
+This is the key demo case.
 
 ```text
-svc_payments_sync
-        ↓
-unused for 91 days
-        ↓
-stale rule
-        ↓
-FLAG
-```
-
-But Bouncer then checks dependencies.
-
-It finds that a critical quarterly:
-
-```text
-payments-reconciliation
-```
-
-job depends on this service account.
-
-So the decision becomes:
-
-```text
-svc_payments_sync
-        ↓
-91 days unused
+Unused for 91 days
         ↓
 Rule 5 flags it
         ↓
-Dependency found
+Dependency check
         ↓
-Possible blast radius
+payments-reconciliation
+critical quarterly job
+depends on it
         ↓
 HOLD
+        ↓
+DO NOT REVOKE
 ```
 
-Bouncer does **not** revoke it.
-
-This is important because it shows:
+This is why:
 
 ```text
-stale ≠ automatically revoke
+unused > 90 days
 ```
 
-The agent first checks whether removing the access could cause a problem.
+is not enough to safely revoke database access.
 
 ---
 
-# Demo Answer Key
+# Answer Key
 
-| Account | Important evidence | Expected decision |
+The demo uses fictional company data.
+
+The expected decisions are:
+
+| Role | Situation | Decision |
 |---|---|---|
-| `test_final_2` | Unowned superuser, no usage | **REVOKE** |
-| `intern_2023` | Left company, stale access | **REVOKE** |
-| `ravi` | Left company, stale access | **REVOKE** |
-| `svc_legacy_reports` | Owner left, stale, no dependency | **REVOKE** |
-| `priya` | Unused `DELETE` permission | **REVOKE DELETE ONLY** |
-| `svc_payments_sync` | Stale but critical dependency exists | **HOLD** |
-| `alice` | Active and recently used | **KEEP** |
-| `bob` | Active and recently used | **KEEP** |
-| `svc_etl` | Active and recently used | **KEEP** |
+| `test_final_2` | Superuser, no usage, not in HR | Revoke superuser + login |
+| `intern_2023` | Left 425 days ago, old usage | Revoke all |
+| `ravi` | Left 200 days ago, old usage | Revoke all |
+| `svc_legacy_reports` | Owner left, unused 97 days, no dependency | Revoke all |
+| `priya` | Active, DELETE never used | Revoke DELETE only |
+| `svc_payments_sync` | Unused 91 days, but critical job depends on it | **HOLD** |
+| `alice` | Active and recently used | Keep |
+| `bob` | Active and recently used | Keep |
+| `svc_etl` | Active and recently used | Keep |
+
+The verified end-to-end run produced the expected final database state, including the `svc_payments_sync` HOLD.
 
 ---
 
 # How the Agent Works
 
-The complete Bouncer flow is:
+Bouncer works in labelled phases.
+
+| Phase | Where | What happens |
+|---|---|---|
+| **1 · Scan** | `bouncer-reader` MCP | Reads roles, grants and governance data |
+| **2 · Analyse** | Sandbox | Generated Python code joins grants with HR and usage data |
+| **3 · Diff** | Agent conversation | Builds the least-privilege plan with reasons and blast radius |
+| **4 · Scripts** | Sandbox | Creates `revoke-plan.sql` and `rollback-plan.sql` |
+| **5 · Safety Check** | Sandbox | Lints and simulates the planned changes |
+| **6 · Ask** | `ask-user-question` | Shows the plan and asks for human approval |
+| **7 · Execute** | `bouncer-revoker` MCP | Runs the approved destructive SQL |
+| **8 · Verify** | `bouncer-reader` MCP | Checks the database after the change |
+
+The actual project uses the sandbox for a **Python lint and simulation** because the sandbox has no network path to the database. It does not connect directly to PostgreSQL during the dry run.
+
+The verified run reported:
 
 ```text
-1. Scan database access
-          ↓
-2. Read HR roster
-          ↓
-3. Read usage history
-          ↓
-4. Apply six flagging rules
-          ↓
-5. Inspect exact permissions
-          ↓
-6. Check service ownership
-          ↓
-7. Check dependencies
-          ↓
-8. Evaluate possible blast radius
-          ↓
-9. Create KEEP / REVOKE / HOLD plan
-          ↓
-10. Generate revoke SQL
-          ↓
-11. Dry run
-          ↓
-12. STOP
-          ↓
-13. Ask for human approval
-          ↓
-14. If approved → Shielded MCP Revoker
-          ↓
-15. Verify result
+LINT PASSED: 7 statements
+ROLLBACK VERIFIED
+DRY RUN PASSED
 ```
 
-The important part is that the agent does not go directly from:
-
-```text
-FLAG
-```
-
-to:
-
-```text
-REVOKE
-```
-
-There is a review and safety step in between.
+before the destructive execution step.
 
 ---
 
-# Human Approval
+# The Safety Flow
 
-Bouncer does not perform the final destructive action immediately after deciding that access should be removed.
+The safety design has several separate layers.
 
-The agent first:
-
-1. Investigates the access.
-2. Prepares the action plan.
-3. Generates the revoke SQL.
-4. Performs a dry run.
-5. Shows what it wants to change.
-6. Stops.
-7. Asks the human for explicit approval.
-
-Only after the human says yes should the actual revoke be executed through the shielded revoker.
-
-> **The agent can recommend a revoke, but it cannot complete the destructive action without human approval.**
-
-This approval is for the actual revocation. It does not mean that every individual permission needs a separate approval.
-
----
-
-# Dry Run
-
-Before making the real change, Bouncer tests the planned SQL inside a transaction.
-
-The basic idea is:
-
-```sql
-BEGIN;
-
--- planned revoke statements
-
-ROLLBACK;
+```text
+              ┌──────────────────────┐
+              │  READ-ONLY READER    │
+              │  Investigate freely  │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │  AGENT ANALYSIS      │
+              │  Flags + context     │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │  SANDBOX             │
+              │  Lint + simulation   │
+              └──────────┬───────────┘
+                         │
+                         ▼
+                    ┌────────┐
+                    │  STOP  │
+                    └───┬────┘
+                        │
+                        ▼
+              ┌──────────────────────┐
+              │ HUMAN APPROVAL #1    │
+              │ Yes / No             │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ SHIELDED REVOKER     │
+              │ TrueForge approval   │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ HUMAN APPROVAL #2    │
+              │ Harness approval     │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ ACTUAL REVOKE        │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ VERIFY WITH READER   │
+              └──────────────────────┘
 ```
 
-The purpose is to test the planned changes without permanently applying them.
+There are **two human gates** in the current implementation:
 
-After the dry run, Bouncer stops and waits for human approval.
+1. The agent asks the human whether to continue.
+2. TrueForge's shield requires approval before the revoker tool runs.
 
----
-
-# MCP Architecture
-
-Bouncer separates investigation from destructive actions.
-
-## Read-only MCP Reader
-
-The reader is used for investigation.
-
-It provides the information Bouncer needs to review:
-
-- database roles
-- permissions
-- usage
-- HR-related information
-- governance information
-
-The reader should not be used to make the final access changes.
-
-## Shielded MCP Revoker
-
-The revoker is used for actual access-changing operations.
-
-It is separated from the reader so the destructive operation is not treated like a normal read operation.
-
-The agent reaches the revoker only after the required approval step.
+The second gate is enforced by the harness rather than being only an instruction in the agent prompt.
 
 ---
 
 # Architecture
 
+The project has three main parts:
+
 ```text
-                         Human
-                           |
-                           v
-                    TrueForge Agent
-                           |
-              +------------+------------+
-              |                         |
-              v                         v
-      Read-only MCP Reader       Approval Checkpoint
-              |                         |
-              v                         |
-          PostgreSQL                    |
-              |                         |
-       +------+------+                  |
-       |      |      |                  |
-      HR    Usage  Grants               |
-       |      |      |                  |
-       +------+------+                  |
-              |                         |
-              v                         |
-       Six Flagging Rules               |
-              |                         |
-              v                         |
-   Permission / Ownership /             |
-   Dependency Check                     |
-              |                         |
-              v                         |
-       KEEP / REVOKE / HOLD             |
-                                        |
-                              Explicit Human YES
-                                        |
-                                        v
-                              Shielded MCP Revoker
-                                        |
-                                        v
-                                    PostgreSQL
-                                        |
-                                        v
-                                    Verification
+                         ┌──────────────────────┐
+                         │      TrueForge       │
+                         │   Agent: bouncer     │
+                         │                      │
+                         │  Analysis            │
+                         │  Approval checkpoints│
+                         │  Sandbox             │
+                         └──────────┬───────────┘
+                                    │
+                       ┌────────────┼────────────┐
+                       │                         │
+                       ▼                         ▼
+            ┌────────────────────┐    ┌────────────────────┐
+            │   BOUNCER READER   │    │  BOUNCER REVOKER   │
+            │                    │    │                    │
+            │ Restricted MCP    │    │ Unrestricted MCP   │
+            │ Read-only path     │    │ Destructive path   │
+            │ Port 8000          │    │ Port 8001          │
+            └─────────┬──────────┘    └─────────┬──────────┘
+                      │                         │
+                      └──────────────┬──────────┘
+                                     │
+                                     ▼
+                           ┌──────────────────────┐
+                           │      PostgreSQL      │
+                           │                      │
+                           │ DB: company          │
+                           │ Host port: 5433      │
+                           │ Container port: 5432 │
+                           └──────────────────────┘
 ```
+
+All exposed service ports are bound to localhost in the current Compose setup.
+
+## Components
+
+| Component | Purpose |
+|---|---|
+| PostgreSQL | Demo database and access data |
+| `bouncer-reader` | Restricted/read-only investigation path |
+| `bouncer-revoker` | Access-changing path |
+| TrueForge | Agent runtime, tools and approval handling |
+| Sandbox | Safe Python analysis, linting and simulation |
+| Bouncer agent | Connects the pieces and makes the review plan |
+
+The reader and revoker are intentionally separate.
+
+The agent can use the reader during investigation, but the destructive path is shielded.
+
+---
+
+# MCP Design
+
+## Read-only Reader
+
+The reader is used for investigation.
+
+It reads:
+
+- PostgreSQL roles
+- database grants
+- HR roster
+- access usage
+- service dependencies
+
+It does not perform the final access-changing operation.
+
+---
+
+## Shielded Revoker
+
+The revoker is used only when an approved plan needs to change database access.
+
+In TrueForge, the revoker is configured so that **all of its tools require approval**.
+
+This matters because the PostgreSQL MCP tools do not provide the annotations that TrueForge's default destructive-tool rule would rely on. The project therefore shields the entire revoker path with `@all`.
+
+The revoker uses a powerful database connection because the demo includes removing superuser status from `test_final_2`.
+
+That makes the approval boundary especially important:
+
+```text
+Agent
+  │
+  │ cannot directly execute destructive SQL
+  ▼
+Shielded Revoker
+  │
+  │ human approval required
+  ▼
+Database change
+```
+
+---
+
+# Dry Run
+
+The dry run is intentionally isolated from the database.
+
+The sandbox cannot reach PostgreSQL.
+
+Instead, Bouncer:
+
+1. Collects the database state through the reader.
+2. Generates the revoke plan.
+3. Generates the rollback plan.
+4. Runs a Python safety check in the sandbox.
+5. Checks that only expected SQL operations are present.
+6. Simulates the planned changes against the collected grant data.
+7. Checks that held access is not removed.
+8. Verifies that the rollback plan restores the original simulated state.
+9. Prints:
+
+```text
+DRY RUN PASSED
+```
+
+This design came from an actual problem during development: the first dry-run attempt tried to reach the database from the sandbox and was blocked. Instead of bypassing the sandbox restriction, the team redesigned the dry run as a local simulation.
 
 ---
 
 # Why This Is an Agent
 
-A normal SQL script could use a fixed rule such as:
+A normal SQL script could use a fixed rule:
 
 ```text
-unused > 90 days → revoke
+unused > 90 days
+        ↓
+REVOKE
 ```
 
-Bouncer has to do more than that.
+That is not enough for this problem.
 
-It has to:
+Bouncer has to:
 
-- inspect multiple sources
-- apply multiple rules
-- understand employee status
-- check service-account ownership
-- inspect exact permissions
-- identify stale access
-- identify never-used permissions
-- check dependencies
-- consider possible blast radius
-- create an action plan
-- generate SQL
-- dry-run the plan
-- stop for approval
-- call the destructive tool only after approval
-- verify the result
+```text
+Read multiple sources
+       ↓
+Understand employee status
+       ↓
+Inspect exact permissions
+       ↓
+Check usage
+       ↓
+Check ownership
+       ↓
+Check service dependencies
+       ↓
+Consider blast radius
+       ↓
+Create a plan
+       ↓
+Generate SQL
+       ↓
+Run a safety check
+       ↓
+Stop
+       ↓
+Ask for approval
+       ↓
+Use the shielded tool
+       ↓
+Verify the result
+```
 
-The agent is not only generating text.
-
-It reaches a real database environment, investigates the data, prepares an action, and is intentionally stopped before the irreversible part.
+The agent is therefore doing more than running one fixed SQL cleanup query. It is using tools, combining information, making a contextual decision, preparing an action, and stopping at a defined safety boundary.
 
 ---
 
 # What Makes Bouncer Different
 
-Bouncer is built around a few important choices.
+The project is built around a few simple design choices:
 
 ### 1. Six flagging rules
 
-It does not depend only on the 90-day stale rule.
+There is no single "90 days = revoke" rule.
 
-### 2. HR status matters
+### 2. Exact permissions matter
 
-Someone who has left the company can be flagged even if they left recently.
+Bouncer can remove one unnecessary permission without removing the user's other access.
 
-### 3. Exact permissions matter
+### 3. HR status matters
 
-Bouncer can identify a specific permission that should be removed instead of removing everything.
+Someone who left the company is handled differently from an active employee.
 
-### 4. Superuser status matters
+### 4. Service ownership matters
 
-An unowned superuser role gets special attention.
+A service account can become risky when its owner leaves.
 
-### 5. Usage matters
+### 5. Dependencies matter
 
-Bouncer checks when access was last used and whether it was ever used.
+An apparently stale account may still be required by another system.
 
-### 6. Service ownership matters
+### 6. Blast radius matters
 
-A service account whose owner has left can be flagged as orphaned.
+The plan explains what could be affected by removing access.
 
-### 7. Dependencies matter
+### 7. Dry run happens before execution
 
-A stale account can still be required by another service.
+The generated revoke plan is checked before it can reach the destructive path.
 
-### 8. Blast radius matters
+### 8. Human approval is required
 
-Bouncer considers what could be affected if the access is removed.
+The agent does not make the final destructive decision alone.
 
-### 9. Partial revoke is possible
+### 9. Read and write paths are separated
 
-For example:
+Investigation and access-changing actions use different MCP paths.
 
-```text
-Priya
-   ↓
-unused DELETE
-   ↓
-REVOKE DELETE
-```
+### 10. The destructive path is shielded
 
-instead of removing all access.
-
-### 10. Dry run happens first
-
-The planned SQL is tested before the real change.
-
-### 11. Human approval is required
-
-The agent stops before the destructive action.
-
-### 12. Read and write paths are separated
-
-The read-only MCP reader and shielded MCP revoker have different roles.
-
----
-
-# Safety Design
-
-Bouncer follows these safety rules:
-
-- Never revoke without explicit human approval.
-- Use the read-only reader for investigation.
-- Use the shielded revoker for actual access changes.
-- Dry-run planned changes before real execution.
-- Never touch `postgres`.
-- Never modify the governance schema.
-- Never modify application data.
-- Use fictional/demo data.
-- Keep local services restricted to localhost.
-- Never expose API keys or secrets.
-
-The goal is not to make the agent completely autonomous.
-
-The goal is to let it do the investigation and preparation while keeping the irreversible action behind a human checkpoint.
-
----
-
-# TrueForge
-
-Bouncer runs through TrueForge as the agent harness.
-
-For this project, the important parts are:
-
-- agent execution
-- MCP tool access
-- approval checkpoints
-- sandbox or safe execution where actually used
-
-TrueForge provides the execution layer around the agent so Bouncer can reach tools and stop at the approval point instead of only returning a text recommendation.
-
-The important part of the demo is that the approval step is part of the agent workflow.
+TrueForge enforces an approval checkpoint before the revoker tool can run.
 
 ---
 
 # Demo Flow
 
-The demo follows this path:
+The demo is built around one important question:
+
+> **What happens when access looks stale, but removing it could break something?**
+
+The flow:
 
 ```text
-Problem
-   ↓
-Scan
-   ↓
-Six flagging rules
-   ↓
-Review flagged access
-   ↓
-Dependency / blast-radius check
-   ↓
-svc_payments_sync → HOLD
-   ↓
-Generate revoke plan
-   ↓
-Dry run
-   ↓
-WAITING FOR APPROVAL
-   ↓
-Human says YES
-   ↓
-Shielded revoker
-   ↓
-Verification
+┌────────────────────┐
+│ 1. Explain Problem │
+└─────────┬──────────┘
+          ↓
+┌────────────────────┐
+│ 2. Scan Database   │
+└─────────┬──────────┘
+          ↓
+┌────────────────────┐
+│ 3. Apply 6 Rules   │
+└─────────┬──────────┘
+          ↓
+┌─────────────────────────┐
+│ 4. Review Flagged Access│
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 5. Check Dependencies   │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│  svc_payments_sync      │
+│  91 days unused         │
+│  but critical job found │
+│                         │
+│          → HOLD         │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 6. Generate Revoke Plan │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 7. Sandbox Dry Run      │
+│                         │
+│  DRY RUN PASSED         │
+└────────────┬────────────┘
+             ↓
+       ┌───────────┐
+       │   STOP    │
+       └─────┬─────┘
+             ↓
+┌─────────────────────────┐
+│ 8. Agent asks human     │
+│                         │
+│ Yes, revoke / No, stop  │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 9. TrueForge Shield     │
+│                         │
+│ Approval required       │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 10. Execute Revoke      │
+└────────────┬────────────┘
+             ↓
+┌─────────────────────────┐
+│ 11. Verify with Reader  │
+└─────────────────────────┘
 ```
 
-The most important moment is when Bouncer **stops and waits for approval** before the real access-changing operation.
+The most important moment is not the SQL execution.
+
+It is the moment where the agent **stops before the destructive action**.
 
 ---
 
 # Example Walkthrough
 
-## Example 1: Employee Left Recently
-
-Suppose an employee left one month ago.
+## Case 1 — Employee left recently
 
 ```text
-HR status = left
+Employee left 1 month ago
         ↓
-Rule 1 flags the access
+Rule 1 flags access
         ↓
-Review permissions
+Check permissions
         ↓
 Check dependencies
         ↓
@@ -838,95 +909,408 @@ The employee does not need to have crossed 90 days for Rule 1 to flag the access
 
 ---
 
-## Example 2: Stale Service Account With Dependency
+## Case 2 — Stale service account with a dependency
 
 ```text
 svc_payments_sync
-        ↓
 91 days unused
         ↓
 Rule 5 flags it
         ↓
 Dependency found
         ↓
+Critical quarterly job
+        ↓
 HOLD
+        ↓
+Do not revoke
 ```
-
-The account is not revoked because another important job depends on it.
 
 ---
 
-## Example 3: Unused Permission
+## Case 3 — Active employee with one unused permission
 
 ```text
 priya
-   ↓
+
 Active employee
-   ↓
 DELETE never used
-   ↓
+        ↓
 Review exact permission
-   ↓
+        ↓
 REVOKE DELETE only
+        ↓
+Keep other permissions
 ```
 
-The rest of Priya's access is not removed just because one permission was unused.
+These cases show why Bouncer needs context before making an access-changing plan.
+
+---
+
+# Safety Rules
+
+The current demo follows these safety rules:
+
+- **Never revoke without explicit human approval.**
+- Use the read-only reader for investigation.
+- Use the shielded revoker for actual access changes.
+- Run a safety check before real execution.
+- Never touch the `postgres` role.
+- Never modify the `governance` schema.
+- Never modify application data.
+- Use fictional/demo data.
+- Keep local services restricted to localhost.
+- Never expose API keys or secrets.
+
+The project is designed so that the agent's ability to investigate is much broader than its ability to make changes.
 
 ---
 
 # Project Structure
 
-The repository currently contains these main areas:
-
 ```text
-agent/
-db/
-demo/
-scripts/
+bouncer-the-access-reviewer-agent/
+│
+├── README.md
+├── CLAUDE.md
+├── docker-compose.yml
+│
+├── db/
+│   └── seed.sql
+│
+├── agent/
+│   ├── instructions.md
+│   └── mcp-config.md
+│
+├── scripts/
+│   └── setup-trueforge.sh
+│
+└── demo/
 ```
 
-The exact files and final run commands may change as the team completes the implementation.
+The main files have these roles:
+
+| File / Folder | Purpose |
+|---|---|
+| `README.md` | Project documentation |
+| `docker-compose.yml` | Starts PostgreSQL and both MCP services |
+| `db/seed.sql` | Creates the fictional database and governance data |
+| `agent/instructions.md` | Source of truth for Bouncer's agent instructions |
+| `agent/mcp-config.md` | MCP and shielding setup |
+| `scripts/setup-trueforge.sh` | Registers MCP servers and creates/updates the Bouncer agent |
+| `demo/` | Demo material |
 
 ---
 
 # How to Run
 
-The final run instructions will be added after the team verifies the complete setup.
+> **Note:** The verified setup uses Docker Desktop, Node 22+, and an Anthropic API key configured in TrueForge. The complete end-to-end flow has been tested successfully on the team's demo setup.
 
-Known setup components include:
+## 1. Clone the repository
 
-- PostgreSQL
-- Docker
-- database: `company`
-- PostgreSQL port: `5432`
-- MCP reader: port `8000`
-- MCP revoker: port `8001`
-- TrueForge
-- model provider configured through TrueForge
+```bash
+git clone https://github.com/arenforge/bouncer-the-access-reviewer-agent.git
+cd bouncer-the-access-reviewer-agent
+```
 
-No unverified commands are included here.
+## 2. Start PostgreSQL and the MCP servers
+
+```bash
+docker compose up -d
+```
+
+This starts:
+
+```text
+PostgreSQL → 127.0.0.1:5433
+Reader     → 127.0.0.1:8000
+Revoker    → 127.0.0.1:8001
+```
+
+The database inside the container still uses PostgreSQL port `5432`. The host uses `5433` because port `5432` was already in use during development.
+
+## 3. Start TrueForge
+
+Open another terminal and run:
+
+```bash
+OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge
+```
+
+Leave this terminal running.
+
+The local TrueForge UI is available at:
+
+```text
+http://localhost:8790
+```
+
+The localhost allowlist is required so TrueForge can register the local MCP endpoints.
+
+## 4. Configure the model provider
+
+For the first setup:
+
+```text
+TrueForge
+   ↓
+Settings
+   ↓
+Add model provider
+   ↓
+Use your own API key
+```
+
+Do not commit API keys or other secrets to the repository.
+
+## 5. Create the Bouncer agent
+
+Run:
+
+```bash
+./scripts/setup-trueforge.sh
+```
+
+This registers the MCP servers and creates or updates the `bouncer` agent using the project instructions.
+
+## 6. Start a Bouncer run
+
+In TrueForge:
+
+```text
+Agents
+  ↓
+bouncer
+  ↓
+New chat
+```
+
+Use:
+
+```text
+Review database access and propose a cleanup.
+```
+
+Bouncer should then move through its investigation, analysis, dry run, approval and verification flow.
+
+---
+
+# Useful Checks
+
+Check the running containers:
+
+```bash
+docker compose ps
+```
+
+Connect directly to the demo database:
+
+```bash
+psql postgresql://postgres:postgres@localhost:5433/company
+```
+
+Or use:
+
+```bash
+docker exec -it bouncer-db psql -U postgres -d company
+```
+
+Check the reader endpoint:
+
+```bash
+curl -N --max-time 2 http://localhost:8000/sse
+```
+
+Check logs:
+
+```bash
+docker logs bouncer-reader
+docker logs bouncer-db
+docker logs bouncer-revoker
+```
+
+---
+
+# Reset Between Demo Runs
+
+A Bouncer run can actually change the demo database.
+
+To reset the database back to the seeded state:
+
+```bash
+docker compose down -v && docker compose up -d
+```
+
+The `-v` removes the existing database volume so the seed data is created again.
+
+Use this before another clean demo run.
+
+---
+
+# Stop the Project
+
+```bash
+docker compose down
+```
+
+---
+
+# What Broke During Development
+
+We kept the failures that changed the final design because they explain why the current architecture looks the way it does.
+
+### 1. Compose and seed files initially contained shell commands
+
+Some committed files contained the commands that had been used to generate them instead of only the actual configuration.
+
+They were fixed manually.
+
+### 2. PostgreSQL port conflict
+
+A local PostgreSQL instance was already using port `5432`.
+
+The Docker database was therefore exposed on:
+
+```text
+127.0.0.1:5433
+```
+
+while PostgreSQL itself still uses `5432` inside the container.
+
+### 3. Seed data did not match the expected answer
+
+Some active accounts had grants without matching usage rows.
+
+That would make a correct agent flag them incorrectly.
+
+The usage data was fixed so the seed matches the intended answer key.
+
+### 4. MCP server binding problem
+
+`postgres-mcp` was initially binding only to localhost inside its container.
+
+That made the service unreachable through the Docker port mapping.
+
+The final setup uses:
+
+```text
+--sse-host=0.0.0.0
+```
+
+inside the container while the Docker ports themselves are published only on `127.0.0.1`.
+
+### 5. TrueForge blocked localhost MCP URLs
+
+TrueForge's outbound URL protection initially blocked the local MCP endpoints.
+
+The final startup uses:
+
+```bash
+OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'
+```
+
+### 6. The first sandbox dry run failed
+
+The first design expected the sandbox to reach PostgreSQL.
+
+It could not.
+
+Instead of bypassing the restriction, the team changed the design.
+
+The final dry run uses:
+
+```text
+Reader collects database state
+        ↓
+Sandbox receives the data
+        ↓
+Python lint + simulation
+        ↓
+Rollback verification
+        ↓
+DRY RUN PASSED
+```
+
+This is now part of the safety design.
+
+### 7. The default destructive-tool rule was not enough
+
+The PostgreSQL MCP tools did not carry the annotations required by TrueForge's default destructive-tool approval rule.
+
+The revoker was therefore configured with:
+
+```text
+require_approval_for_tools = ["@all"]
+```
+
+This makes the approval boundary explicit.
+
+### 8. Localhost binding was tightened
+
+The MCP services were initially published on all interfaces.
+
+The final Compose setup binds them to:
+
+```text
+127.0.0.1
+```
+
+so the unauthenticated local demo endpoints are not exposed to the venue network.
+
+---
+
+# Verified End-to-End Result
+
+The first full end-to-end run was completed successfully.
+
+The verified sequence was:
+
+```text
+Reader scan
+    ↓
+Sandbox analysis
+    ↓
+Revoke + rollback scripts
+    ↓
+LINT PASSED
+    ↓
+ROLLBACK VERIFIED
+    ↓
+DRY RUN PASSED
+    ↓
+Agent asks for approval
+    ↓
+TrueForge shield asks for approval
+    ↓
+Approved
+    ↓
+Revoker executes
+    ↓
+Reader verifies
+```
+
+The final database state matched the expected answer key, including keeping `svc_payments_sync` because of its critical dependency.
 
 ---
 
 # Limitations
 
-Bouncer is a hackathon prototype, not a production access-governance system.
+Bouncer is a hackathon prototype.
 
-Some limitations are:
+Some important limitations are:
 
 - The demo uses fictional/sample data.
-- The system depends on the quality of the HR, usage and dependency information available to it.
-- A flag does not prove that access is unnecessary.
+- The quality of the decision depends on the HR, usage and dependency information available to the agent.
+- A flag is not proof that access is unnecessary.
 - Human review is intentionally required before destructive changes.
-- Dependency information may not cover every possible real-world relationship.
-
-The system is designed to help with access review, not to remove the need for human responsibility.
+- Dependency information in the demo comes from the provided governance data.
+- The project is not presented as a production access-governance system.
 
 ---
 
 # Future Improvements
 
-Some possible next steps are:
+Possible next steps include:
 
 - richer dependency discovery
 - audit history for every decision
@@ -934,6 +1318,46 @@ Some possible next steps are:
 - scheduled access reviews
 - support for more database systems
 - more detailed policy configuration
+
+These are future ideas, not claims about the current implementation.
+
+---
+
+# Why the Pause Matters
+
+The most important design decision in Bouncer is not the revoke SQL.
+
+It is the boundary before the revoke.
+
+```text
+            Agent can investigate
+                    │
+                    ▼
+            Agent can prepare
+            a revoke plan
+                    │
+                    ▼
+            Agent can dry-run
+                    │
+                    ▼
+                 ┌───────┐
+                 │ STOP  │
+                 └───┬───┘
+                     │
+              Human approval
+                     │
+                     ▼
+              Shielded revoker
+                     │
+                     ▼
+               Database change
+```
+
+The agent is allowed to do the work needed to understand the problem.
+
+It is **not** allowed to silently complete the destructive part.
+
+That is the line Bouncer is built around.
 
 ---
 
@@ -943,4 +1367,12 @@ AI tools were used during development for brainstorming, debugging, documentatio
 
 The team reviewed the suggestions and tested the final implementation.
 
-The team can explain the architecture and the decisions made in the project.
+The architecture, safety boundaries and project decisions were reviewed by the team, and the team can explain how the system works.
+
+---
+
+## Built for the TrueFoundry × Polaris Build Agents That Act Hackathon
+
+**Bouncer — The Access Reviewer Agent**
+
+> Review first. Understand the blast radius. Ask before changing anything.
