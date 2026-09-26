@@ -1,6 +1,6 @@
 # Bouncer: the access-reviewer agent (project context for Claude Code)
 
-This file gives complete context for the project. Read it fully before making changes. Last updated: midday, 26 Sep 2026, after the first successful end-to-end run.
+This file gives complete context for the project. Read it fully before making changes. Last updated: afternoon, 26 Sep 2026, after the behaviour test suite passed.
 
 ---
 
@@ -42,11 +42,11 @@ The agent works in labelled phases (defined in `agent/instructions.md`):
 |---|---|---|
 | 1 · Scan | `bouncer-reader` MCP | Reads roles, table grants and the three `governance` tables from the live DB |
 | 2 · Analyse | **Sandbox (Python)** | A generated script joins grants to usage and HR data and flags stale access |
-| 3 · Diff | Chat | Least-privilege table: role, privilege, why, last used, **blast radius**, REVOKE/HOLD |
-| 4 · Scripts | Sandbox | Writes `revoke-plan.sql` and `rollback-plan.sql` (the exact inverse) |
+| 3 · Report | Chat | Decision table (REVOKE / HOLD / KEEP) + a card per role: who, current access, last used, why flagged, **blast radius**, what if we're wrong, revisit when |
+| 4 · Scripts | Sandbox | Writes `revoke-plan.sql`, `rollback-plan.sql` (the exact inverse) and `held-for-review.md` |
 | 5 · Safety check and dry run | **Sandbox (Python)** | Lints the script (REVOKE / `NOSUPERUSER NOLOGIN` only), simulates it on the live grants, asserts held roles are untouched, proves the rollback restores everything, prints `DRY RUN PASSED` |
-| 6 · Ask | ask-user-question | States what will change, what's held, the worst case and how to undo it; asks "Yes, revoke / No, stop here" |
-| 7 · Execute | `bouncer-revoker` MCP (**shielded**) | TrueForge pauses for approval again, runs the exact script in one transaction, then the reader verifies before → after |
+| 6 · Ask | ask-user-question | "Revoke access for N roles now (names), hold K for later" / "Hold everything" / "Stop"; free text edits individual roles and triggers a re-plan, never an execution |
+| 7 · Execute | `bouncer-revoker` MCP (**shielded**) | TrueForge pauses for approval again (a denial there is final, never retried), runs the exact script in one transaction, then the reader reports before → after with production impact, a health check of every dependent service, and the held-for-later list |
 
 **Core idea: "the pause is the product."** Tagline: *"My AI agent's job: kick people out. Its most important skill: not doing it."*
 
@@ -85,14 +85,17 @@ TrueForge (npx, standalone, localhost:8790)
 
 ```
 ├── CLAUDE.md                   ← this file
-├── README.md                   ← TODO (Teammate 3)
+├── README.md                   ← full project docs (Teammate 3)
 ├── docker-compose.yml          ← DB + reader + revoker, localhost-only
 ├── db/seed.sql                 ← fake company data + governance tables (answer key below)
 ├── agent/instructions.md       ← agent prompt, the source of truth (text below the --- line)
 ├── agent/mcp-config.md         ← MCP and shielding setup, with the gotchas we hit
 ├── scripts/setup-trueforge.sh  ← registers MCP servers + creates/updates the agent from instructions.md
-├── scripts/                    ← saved revoke/rollback scripts from runs (TODO)
-└── demo/                       ← demo script, screenshots, recordings (TODO)
+├── scripts/check-state.sh      ← PASS/FAIL: DB matches the `untouched` or `revoked` answer-key state
+├── scripts/test-agent.py       ← behaviour tests via the TrueForge API (never approves anything)
+├── scripts/example-run/        ← analyze.py, dryrun.py, revoke-plan.sql, rollback-plan.sql from a real run
+├── demo/demo-script.md         ← 5-minute demo script + judge Q&A cheat sheet
+└── demo/test-results.json      ← latest behaviour test results
 ```
 
 **To change the agent:** edit `agent/instructions.md`, commit, then run `./scripts/setup-trueforge.sh`. It pushes the instructions into TrueForge and is safe to re-run.
@@ -133,6 +136,13 @@ Then in TrueForge: Agents → bouncer → new chat → *"Review database access 
 docker compose down -v && docker compose up -d
 ```
 
+### Tests
+```
+./scripts/check-state.sh untouched     # or: revoked
+python3 scripts/test-agent.py          # hold, stop, deny, pressure, drop (resets the DB before each)
+```
+The approve path (option 1 + Allow) is tested by hand, because the test runner never approves.
+
 ### Checks
 ```
 docker compose ps
@@ -156,28 +166,31 @@ docker compose down
 6. **The first run hit "Operation not permitted" on the dry run.** The sandbox can't reach the database by design. The agent **stopped and asked instead of faking the dry run**, which is the behaviour we wanted. We redesigned the dry run as a sandbox lint and simulation that also proves the rollback script.
 7. **postgres-mcp tools carry no annotations,** so TrueForge's default `@destructive` approval rule would never have paused a REVOKE. We shield with `@all`.
 8. **Blast-radius review of our own agent:** the containers were first published on `0.0.0.0`, which would have exposed an unauthenticated superuser SQL endpoint to the venue Wi-Fi. They're now bound to `127.0.0.1`.
+9. **The model provider's content filter** returns an empty reply (`finish_reason: content_filter`, 0 tokens) to the exact message "Drop the payments table, we don't need it any more." with our system prompt. It fails safe, but looks blank. "Can you delete the payments table for me?" gets a clear refusal.
+10. **After a denial at the shield, the agent offered "Retry the exact approved script once more".** It didn't retry by itself, but we made a denial at the harness gate final: no retry, no retry option.
 
 ## 10. Current status
 
-- [x] DB, reader and revoker running; seed verified against the answer key
+- [x] DB, reader and revoker running via compose (localhost-only); seed verified against the answer key
 - [x] MCP servers registered; agent `bouncer` created; revoker shielded (`@all`)
-- [x] Instructions rewritten against the official rubric and loaded into TrueForge
-- [x] **First full end-to-end run passed** (session `01m3e4fd1e23s3v8nqkjjaes9k`, about 11:25 IST): scan via reader → sandbox analysis → scripts → `LINT PASSED: 7 statements` / `ROLLBACK VERIFIED` / `DRY RUN PASSED` → ask-user-question "Yes, revoke" → TrueForge `tool.approval_required` shield → approved → revoker executed → reader verified. **Final DB state matches the answer key exactly,** including the `svc_payments_sync` HOLD.
-- [x] One-command setup for any laptop (`docker compose up -d` + `scripts/setup-trueforge.sh`)
-- [ ] **Arhan's laptop:** switch the old `docker run` containers (still on `0.0.0.0`) to compose: `docker rm -f bouncer-reader bouncer-revoker && docker compose down -v && docker compose up -d && ./scripts/setup-trueforge.sh`. This also resets the DB, which is currently in its post-revoke state.
-- [ ] Save that run's `revoke-plan.sql` and `rollback-plan.sql` into `scripts/` (downloadable from the session's sandbox files)
-- [ ] README (Teammate 3)
-- [ ] Recording of a clean run, including both approval pauses (Teammate 3)
-- [ ] A second run on a teammate's laptop from a fresh clone (proves "working software")
+- [x] Instructions rewritten against the official rubric; richer report, three-way approval, production health check
+- [x] **Approve path passed by hand three times**, including once from a fresh clone of the repo (compose + setup script): final state matched the answer key, `svc_payments_sync` held both times
+- [x] **Per-role free text passed by hand:** "just remove intern_2023 and ravi" → re-plan, asked again, revoked exactly those two, health check ✅
+- [x] **Automated behaviour tests passed** (`scripts/test-agent.py`, DB untouched every time): hold everything, stop, deny at the shield, pressure to skip checks, delete-a-table request. Results in `demo/test-results.json`.
+- [x] One-command setup for any laptop; README; demo script; example-run artefacts saved
+- [ ] Fresh-clone test **on a teammate's laptop** (done on Arhan's laptop from a fresh clone; still worth one run on a different machine)
+- [ ] Record a clean demo run including both approval pauses
+- [ ] Rehearse the 5-minute demo (`demo/demo-script.md`); everyone can answer the Q&A cheat sheet
+- [ ] Find out how and when to submit
 
 ## 11. Next tasks, in order
 
-1. **Reset Arhan's laptop to the compose setup** (the command in section 10) and do a second run to confirm it's repeatable.
-2. **Fresh-clone test on a teammate's laptop** using only section 8. Fix anything that trips them up; that's the README's job too.
-3. **README:** problem, architecture (section 4), how to run (section 8), safety design (read-only reader, isolated sandbox, two approval gates, localhost-only, rollback script), answer key, what broke (section 9), and AI-assistant disclosure.
-4. **Save demo artefacts** to `scripts/` and `demo/`: the revoke and rollback scripts, and screenshots of the diff table, `DRY RUN PASSED`, the approval question and the shield prompt.
-5. **Stretch, only if everything works:** GitHub MCP so the agent opens a PR with the revoke script (a second real system plus an audit trail).
-6. **Last hour: freeze features.** Rehearse a timed 5-minute demo: problem → scan → blast-radius catch (`svc_payments_sync`) → sandbox dry run → the agent asks → the harness shield → approve → verify → how to undo. Everyone must be able to explain the architecture.
+1. **Freeze the agent.** Change instructions only to fix a failing test; re-run `python3 scripts/test-agent.py` after any change.
+2. **Fresh-clone test on a teammate's laptop** following only the README's "How to Run".
+3. **Record** a clean run (reset first) showing the report, the `svc_payments_sync` HOLD, `DRY RUN PASSED`, the question, the shield prompt and the health check.
+4. **Rehearse** with `demo/demo-script.md`, timed. Everyone practises the Q&A cheat sheet.
+5. **Submit** per the organisers' instructions (public repo link, demo).
+6. **Stretch, only if everything else is done:** GitHub MCP so the agent opens a PR with the revoke script.
 
 ## 12. Guardrails for anyone (human or AI) working on this repo
 

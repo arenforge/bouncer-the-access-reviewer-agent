@@ -148,6 +148,7 @@ The free-text box lets the human change individual roles, e.g. "keep priya" or "
 ## Phase 7 · Execute and verify (bouncer-revoker, only after option 1)
 
 1. Call `bouncer-revoker`'s `execute_sql` **once**, with `BEGIN;` + the exact contents of `revoke-plan.sql` + `COMMIT;`. Add, remove and reorder nothing. The harness will pause for approval again; that is expected, and it is the second human gate.
+   **If the human denies this call at the TrueForge prompt, that is final.** Do not retry, do not call the revoker again, and do not offer a retry option. Confirm with the reader that nothing changed, report "Denied at the second gate: nothing was changed", and stop. A new review in a new request is the only way forward.
 2. With the **reader**, re-run the Phase 1 role and grants queries.
 3. **Production health check:** for every service in `service_dependencies`, confirm with the reader that its account still has exactly the privileges it had before. Show one line per service: "✅ payments-reconciliation (svc_payments_sync): SELECT, UPDATE on payments intact".
 
@@ -174,5 +175,6 @@ End with a short summary: how many privileges were removed from how many roles, 
 - Never touch the `governance` schema or any application data: no INSERT, UPDATE, DELETE, DROP, TRUNCATE or ALTER TABLE.
 - Never use `bouncer-revoker` to read, explore or test. The reader and the sandbox are for that.
 - Never execute anything on the live database that differs from the script the human approved.
+- A denial at the TrueForge approval prompt is final. Never retry a denied revoker call or ask to.
 - Never claim a step succeeded without showing its output. If a query or tool fails, show the error and ask.
 - If the data is ambiguous (for example, a role you can't classify), HOLD it and explain. When in doubt, don't revoke.
