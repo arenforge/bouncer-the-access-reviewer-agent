@@ -49,7 +49,7 @@ This file gives complete context for the project. Read it fully before making ch
 ## 4. Architecture
 
 ```
-Postgres (fake company DB, Docker, port 5432, db "company")
+Postgres (fake company DB, Docker, host port 5433, db "company")
    ├── MCP "reader"  → crystaldba/postgres-mcp --access-mode=restricted   → port 8000 → read-only scanning
    └── MCP "revoker" → crystaldba/postgres-mcp --access-mode=unrestricted → port 8001 → marked SHIELDED in TrueForge
 TrueForge sandbox → runs the revoke script with psql inside BEGIN … ROLLBACK (dry run)
@@ -60,7 +60,7 @@ Why two MCP servers: the agent can read everything freely, but it physically can
 
 ## 5. TrueForge setup (already installed)
 
-- Start: `npx @truefoundry/trueforge` (same command every time; data persists in `~/Library/Application Support/trueforge/db/db.sqlite`). Stop: `Ctrl + C`.
+- Start: `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge` (the env var lets it reach the local MCP servers; same command every time; data persists in `~/Library/Application Support/trueforge/db/db.sqlite`). Stop: `Ctrl + C`.
 - Version: TrueForge v0.2.1, standalone mode.
 - UI: http://localhost:8790. API docs: http://localhost:8790/api/v1/docs.
 - Standalone mode is **localhost-only, not hardened**. Never expose it to the venue network.
@@ -77,7 +77,7 @@ Why two MCP servers: the agent can read everything freely, but it physically can
 ## 6. Repository
 
 - **GitHub:** https://github.com/arenforge/bouncer-the-access-reviewer-agent
-- **Local path:** `~/projects/bouncer-the-access-reviewer-agent` (cloned outside Desktop on purpose, because macOS blocked Terminal from reading Desktop with "Operation not permitted"). Use the editor's built-in terminal, or grant Terminal "Files & Folders → Desktop" or "Full Disk Access" in System Settings.
+- **Local path:** `~/Desktop/bouncer/bouncer-the-access-reviewer-agent` on Arhan's laptop (originally planned for `~/projects/…`, because macOS blocked Terminal from reading Desktop with "Operation not permitted"). Use the editor's built-in terminal, or grant Terminal "Files & Folders → Desktop" or "Full Disk Access" in System Settings.
 
 Intended structure:
 ```
@@ -115,7 +115,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: company
     ports:
-      - "5432:5432"
+      - "5433:5432" # 5433 on the host so it never clashes with a local Postgres on 5432
     volumes:
       - ./db/seed.sql:/docker-entrypoint-initdb.d/seed.sql
 ```
@@ -238,6 +238,8 @@ INSERT INTO governance.access_usage VALUES
   ('alice',              'payments',  'INSERT', CURRENT_DATE - 2),
   ('alice',              'payments',  'UPDATE', CURRENT_DATE - 3),
   ('alice',              'customers', 'SELECT', CURRENT_DATE - 1),
+  ('alice',              'customers', 'INSERT', CURRENT_DATE - 6),
+  ('alice',              'customers', 'UPDATE', CURRENT_DATE - 8),
   ('bob',                'reports',   'SELECT', CURRENT_DATE - 5),
   ('bob',                'payments',  'SELECT', CURRENT_DATE - 2),
   ('priya',              'payments',  'SELECT', CURRENT_DATE - 1),
@@ -251,6 +253,7 @@ INSERT INTO governance.access_usage VALUES
   ('ravi',               'payments',  'SELECT', CURRENT_DATE - 210),
   ('svc_etl',            'payments',  'SELECT', CURRENT_DATE),
   ('svc_etl',            'customers', 'SELECT', CURRENT_DATE),
+  ('svc_etl',            'reports',   'SELECT', CURRENT_DATE),
   ('svc_etl',            'reports',   'INSERT', CURRENT_DATE),
   ('svc_legacy_reports', 'reports',   'SELECT', CURRENT_DATE - 97),
   ('svc_legacy_reports', 'payments',  'SELECT', CURRENT_DATE - 97),
@@ -281,18 +284,18 @@ brew install libpq && brew link --force libpq
 
 ### Start
 ```
-cd ~/projects/bouncer-the-access-reviewer-agent
+cd ~/Desktop/bouncer/bouncer-the-access-reviewer-agent
 docker compose up -d
 docker exec -it bouncer-db psql -U postgres -d company -c "\du"
 docker exec -it bouncer-db psql -U postgres -d company -c "SELECT * FROM governance.hr_roster;"
 
-docker run -d --name bouncer-reader -p 8000:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5432/company crystaldba/postgres-mcp --access-mode=restricted --transport=sse
+docker run -d --name bouncer-reader -p 8000:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company crystaldba/postgres-mcp --access-mode=restricted --transport=sse --sse-host=0.0.0.0
 
-docker run -d --name bouncer-revoker -p 8001:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5432/company crystaldba/postgres-mcp --access-mode=unrestricted --transport=sse
+docker run -d --name bouncer-revoker -p 8001:8000 -e DATABASE_URI=postgresql://postgres:postgres@host.docker.internal:5433/company crystaldba/postgres-mcp --access-mode=unrestricted --transport=sse --sse-host=0.0.0.0
 
 docker ps
 ```
-Register in TrueForge: reader at `http://localhost:8000/sse`, and revoker at `http://localhost:8001/sse` (**Shielded**). If TrueForge needs a different transport, change only the `--transport` flag.
+Register in TrueForge: reader at `http://localhost:8000/sse`, and revoker at `http://localhost:8001/sse` (**Shielded**). postgres-mcp only supports `stdio` and `sse`, so SSE it is. `--sse-host=0.0.0.0` is required, or the server binds to localhost inside the container and is unreachable. TrueForge must be started with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'` or it rejects localhost MCP URLs. Full steps: `agent/mcp-config.md`.
 
 ### Maintenance
 ```
@@ -305,7 +308,7 @@ docker exec -it bouncer-db psql -U postgres -d company # DB shell (\q to exit)
 
 ### Dry-run pattern (sandbox)
 ```
-psql postgresql://postgres:postgres@localhost:5432/company -v ON_ERROR_STOP=1 <<'SQL'
+psql postgresql://postgres:postgres@localhost:5433/company -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN;
 -- revoke statements here
 -- verification queries here (e.g. \dp payments, SELECT rolsuper FROM pg_roles WHERE rolname='test_final_2')
@@ -323,11 +326,14 @@ docker rm -f bouncer-reader bouncer-revoker
 
 - [x] TrueForge installed and running locally
 - [x] Repo created on GitHub and cloned to `~/projects/…`
-- [x] `docker-compose.yml` and `db/seed.sql` written (above). Confirm they're in the repo and committed.
-- [ ] Docker Desktop running; `docker compose up -d` succeeds; seed verified
-- [ ] Both MCP containers running
-- [ ] MCP servers registered in TrueForge (revoker marked Shielded)
-- [ ] Agent instructions written in `agent/instructions.md` and pasted into TrueForge
+- [x] `docker-compose.yml` and `db/seed.sql` committed (fixed: stray heredoc lines removed, host port moved to 5433, usage rows added so alice/svc_etl stay "keep")
+- [x] Docker Desktop running; `docker compose up -d` succeeds; seed verified against the answer key
+- [x] Both MCP containers running (with `--sse-host=0.0.0.0`)
+- [x] Dry-run pattern verified with psql (`BEGIN … ROLLBACK` leaves the DB unchanged)
+- [ ] TrueForge restarted with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'`
+- [ ] MCP servers registered in TrueForge (revoker marked Shielded, `@all`)
+- [x] Agent instructions written in `agent/instructions.md`
+- [ ] Instructions pasted into TrueForge
 - [ ] First full end-to-end run
 - [ ] Revoke scripts saved to `scripts/`
 - [ ] README

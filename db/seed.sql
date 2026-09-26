@@ -1,5 +1,3 @@
-mkdir -p db
-cat > db/seed.sql << 'EOF'
 -- Bouncer demo database: a fake company with stale access to clean up.
 -- All names, passwords and data are fictional.
 
@@ -95,6 +93,8 @@ INSERT INTO governance.access_usage VALUES
   ('alice',              'payments',  'INSERT', CURRENT_DATE - 2),
   ('alice',              'payments',  'UPDATE', CURRENT_DATE - 3),
   ('alice',              'customers', 'SELECT', CURRENT_DATE - 1),
+  ('alice',              'customers', 'INSERT', CURRENT_DATE - 6),
+  ('alice',              'customers', 'UPDATE', CURRENT_DATE - 8),
   ('bob',                'reports',   'SELECT', CURRENT_DATE - 5),
   ('bob',                'payments',  'SELECT', CURRENT_DATE - 2),
   ('priya',              'payments',  'SELECT', CURRENT_DATE - 1),
@@ -108,6 +108,7 @@ INSERT INTO governance.access_usage VALUES
   ('ravi',               'payments',  'SELECT', CURRENT_DATE - 210),
   ('svc_etl',            'payments',  'SELECT', CURRENT_DATE),
   ('svc_etl',            'customers', 'SELECT', CURRENT_DATE),
+  ('svc_etl',            'reports',   'SELECT', CURRENT_DATE),
   ('svc_etl',            'reports',   'INSERT', CURRENT_DATE),
   ('svc_legacy_reports', 'reports',   'SELECT', CURRENT_DATE - 97),
   ('svc_legacy_reports', 'payments',  'SELECT', CURRENT_DATE - 97),
@@ -125,4 +126,3 @@ CREATE TABLE governance.service_dependencies (
 INSERT INTO governance.service_dependencies VALUES
   ('svc_etl',           'daily-analytics-load',    'Loads payments and customers into the analytics warehouse', 'daily',                     'medium'),
   ('svc_payments_sync', 'payments-reconciliation', 'Reconciles payments with the bank every quarter',          'quarterly (next run soon)', 'critical');
-EOF
