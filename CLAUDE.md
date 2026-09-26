@@ -1,314 +1,144 @@
 # Bouncer: the access-reviewer agent (project context for Claude Code)
 
-This file gives complete context for the project. Read it fully before making changes.
+This file gives complete context for the project. Read it fully before making changes. Last updated: midday, 26 Sep 2026, after the first successful end-to-end run.
 
 ---
 
 ## 1. Who and when
 
-- **Builder:** Arhan Khan (SDE intern, full-stack developer), possibly with teammates.
+- **Team:** Arhan Khan (lead: TrueForge, MCP, `agent/`) plus two teammates (Teammate 2: `db/`, `scripts/`, testing; Teammate 3: `README.md`, `demo/`, build-story posts).
 - **Event:** Agents That Act, the TrueFoundry × Polaris hackathon.
-- **Date and place:** Saturday, 26 September 2026, Polaris School of Technology, Bengaluru. One in-person build day (about 7 hours), live demos and prizes the same evening.
-- **Machine:** MacBook Air (Apple Silicon), macOS, zsh, Homebrew, Docker Desktop, VS Code-style editor.
+- **Date and place:** Saturday, 26 September 2026, Polaris School of Technology, Bengaluru. One build day (about 7 hours), live demos and prizes the same evening.
+- **Demo machine:** Arhan's MacBook Air (Apple Silicon), macOS, zsh, Homebrew, Docker Desktop, VS Code.
 
-## 2. Hackathon rules that constrain this project
+## 2. Hackathon rules (from the official page)
 
-- The agent **must be built on TrueForge**, TrueFoundry's open-source (MIT) agent harness.
-- Every submission must show the harness doing real work:
-  1. **a real tool reached** (a real system over MCP),
-  2. **code run in a sandbox**,
-  3. **a pause before anything irreversible** (human approval).
-- **Projects must be built on the day.** Pre-built projects aren't eligible.
-- **Judging, out of 100:**
-  - harness doing real work: 30
-  - it actually runs: 25
-  - **where it stops** (the approval pause and blast-radius awareness): 20
-  - a job worth handing over: 15
-  - demo clarity: 10
-- The official "access reviewer" brief mentions walking IAM roles, service accounts, and permissions unused for 90 days, and producing a least-privilege diff with the **blast radius** of each revocation spelled out.
+Three build rules, quoted:
+1. **Reach something real:** "Connected over MCP, with real credentials and real consequences — not a mocked function returning fixture data."
+2. **Run what it writes:** generated code needs somewhere to run that is "isolated, disposable, and unable to damage anything when it is wrong."
+3. **Know when to stop:** "The agent should pause at that line and wait for a person, every time."
 
-**Priority order when making trade-offs:** it runs end to end > the pause is harness-enforced > blast radius is clear > polish.
+Submission must-haves: agent on TrueForge with the harness visibly working; one complete job; **"Show us where the code ran and show us the agent stopping to ask"**; a public repo with a working README; own credentials only, none hard-coded. AI assistants are allowed but must be disclosed in the README. A project nobody on the team can explain is disqualified.
+
+**Judging, out of 100:**
+
+| Criterion | Pts | What judges check |
+|---|---|---|
+| Harness doing work | 30 | TrueForge reaching a real tool, running generated code in the sandbox, holding for a person. Not "a prompt with a nice wrapper". |
+| Working software | 25 | A stranger can clone the repo, follow the README and run it on their laptop. |
+| Where it stops | 20 | "Which actions did you decide the agent may never take alone, and can you defend the line you drew?" |
+| Job worth delegating | 15 | Would a real person delegate this? |
+| Demo clarity | 10 | Five minutes. "Judges will ask you to explain your own architecture." |
+
+Official access-reviewer brief: "Walks your IAM roles and service accounts, finds the permissions nobody has used in ninety days, and proposes a least-privilege diff with the blast radius of each revocation spelled out." REACHES: identity provider. GATE: revoking access.
+
+**Priority when trading off:** runs end to end > pause is harness-enforced > blast radius is clear > polish.
 
 ## 3. What the agent does
 
-**Bouncer** reviews who has access to what, and proposes cleanup:
+The agent works in labelled phases (defined in `agent/instructions.md`):
 
-1. **Scans** database roles and their grants (read-only).
-2. **Cross-checks** each grant against:
-   - the **usage log** (when each privilege was last used),
-   - the **HR roster** (who still works here, who owns each service account).
-3. **Flags** stale access: unused for 90+ days, never used, belonging to people who've left, ownerless accounts, and over-privileged grants.
-4. **Works out the blast radius** of each removal using a service-dependency table ("if I remove this, what breaks?").
-5. **Writes a revocation SQL script.**
-6. **Dry-runs** the script in the sandbox inside `BEGIN … ROLLBACK`, so nothing changes.
-7. **Pauses.** It presents the plan (each grant, the reason, and the blast radius), holds back anything risky, and waits for human approval.
-8. Only after approval does it **run the revocation through a shielded tool**, which the harness forces to ask before running.
+| Phase | Where it runs | What happens |
+|---|---|---|
+| 1 · Scan | `bouncer-reader` MCP | Reads roles, table grants and the three `governance` tables from the live DB |
+| 2 · Analyse | **Sandbox (Python)** | A generated script joins grants to usage and HR data and flags stale access |
+| 3 · Diff | Chat | Least-privilege table: role, privilege, why, last used, **blast radius**, REVOKE/HOLD |
+| 4 · Scripts | Sandbox | Writes `revoke-plan.sql` and `rollback-plan.sql` (the exact inverse) |
+| 5 · Safety check and dry run | **Sandbox (Python)** | Lints the script (REVOKE / `NOSUPERUSER NOLOGIN` only), simulates it on the live grants, asserts held roles are untouched, proves the rollback restores everything, prints `DRY RUN PASSED` |
+| 6 · Ask | ask-user-question | States what will change, what's held, the worst case and how to undo it; asks "Yes, revoke / No, stop here" |
+| 7 · Execute | `bouncer-revoker` MCP (**shielded**) | TrueForge pauses for approval again, runs the exact script in one transaction, then the reader verifies before → after |
 
-**Core idea: "the pause is the product."** Any tool that can revoke access can also lock out an on-call team, so this agent never revokes without a human yes. Tagline: *"My AI agent's job: kick people out. Its most important skill: not doing it."*
+**Core idea: "the pause is the product."** Tagline: *"My AI agent's job: kick people out. Its most important skill: not doing it."*
 
 ## 4. Architecture
 
 ```
-Postgres (fake company DB, Docker, host port 5433, db "company")
-   ├── MCP "reader"  → crystaldba/postgres-mcp --access-mode=restricted   → port 8000 → read-only scanning
-   └── MCP "revoker" → crystaldba/postgres-mcp --access-mode=unrestricted → port 8001 → marked SHIELDED in TrueForge
-TrueForge sandbox → runs the revoke script with psql inside BEGIN … ROLLBACK (dry run)
-TrueForge agent   → model: claude-fable-5 (or whatever the event's AI Gateway provides)
+docker compose (all ports on 127.0.0.1 only)
+  db       postgres:16, db "company"             host 127.0.0.1:5433
+  reader   postgres-mcp --access-mode=restricted   host 127.0.0.1:8000/sse  → reaches db over the compose network
+  revoker  postgres-mcp --access-mode=unrestricted host 127.0.0.1:8001/sse  → SHIELDED in TrueForge (@all)
+
+TrueForge (npx, standalone, localhost:8790)
+  agent "bouncer"   model anthropic/claude-fable-5, reasoning effort low
+  MCP               bouncer-reader (no approval), bouncer-revoker (every tool needs approval)
+  sandbox           local macOS seatbelt sandbox; network only to PyPI/GitHub, so NO path to the DB
 ```
 
-Why two MCP servers: the agent can read everything freely, but it physically can't change anything except through the shielded revoker. Shielded tools always ask before running, so the pause is **enforced by the harness, not just requested in the prompt.** That's the strongest possible answer to the "where it stops" criterion.
+**Why this shape:** the agent can read freely but can only change the database through the shielded revoker, so the pause is **enforced by the harness, not just the prompt**. The sandbox physically can't reach the database, so generated code can never damage it. There are two human gates: the agent's own approval question, then TrueForge's shield.
 
-## 5. TrueForge setup (already installed)
+**The revoker is as powerful as a DBA** (it connects as `postgres`), because removing superuser from `test_final_2` requires a superuser. That's the defended line: no call reaches it without a human yes.
 
-- Start: `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge` (the env var lets it reach the local MCP servers; same command every time; data persists in `~/Library/Application Support/trueforge/db/db.sqlite`). Stop: `Ctrl + C`.
-- Version: TrueForge v0.2.1, standalone mode.
-- UI: http://localhost:8790. API docs: http://localhost:8790/api/v1/docs.
-- Standalone mode is **localhost-only, not hardened**. Never expose it to the venue network.
-- Auth is disabled in standalone mode.
-- The log shows **"Local sandbox fallback is available"** (Mac bash + Python 3.14). The sandbox likely runs directly on the Mac rather than in an isolated container. Hence the `BEGIN … ROLLBACK` dry-run for safety. `psql` must be installed on the Mac (`brew install libpq && brew link --force libpq`).
-- **Build Agent screen fields:** model (`claude-fable-5`, reasoning effort low), Instructions, Runtime Config (iteration limit 100, sandbox on, compaction on, large tool response on, dynamic sub-agents on, generative UI on, ask user questions on), MCP Servers, Skills.
-- The **"Select MCP Tools"** dialog is empty until MCP servers are registered. Registration is probably in **Settings** or documented in **Docs** in the sidebar. The dialog footer reads: *"Shielded tools always ask before the agent runs them."*
-- **Open questions to confirm with mentors or docs:**
-  - exactly where and how to register an MCP server (URL-based SSE vs. streamable HTTP),
-  - how to mark a tool as shielded,
-  - whether an isolated sandbox is available.
-- **Model access:** Arhan's Anthropic Console org hit a self-set $1 monthly spend limit (resets Oct 1). Either raise it in the Console settings (Limits) or use the model access provided through TrueFoundry's AI Gateway at the event.
+## 5. TrueForge facts we confirmed
+
+- Start: `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge`. Without the env var, registering MCP servers fails with `Outbound URL blocked for host "localhost"` (an SSRF guard). The allowlist is an exact-host match; everything else stays blocked.
+- Version v0.2.1, standalone mode, no auth, listens on localhost only. **Never expose it to the venue network**, because anyone who reaches it could approve revokes. To share with teammates, use an SSH tunnel (`ssh -N -L 8790:localhost:8790 arhan@<ip>`, with Remote Login on and their keys in `authorized_keys`), Tailscale if the Wi-Fi blocks peer traffic, or screen sharing.
+- UI http://localhost:8790. API http://localhost:8790/api/v1 (spec at `/api/v1/openapi.json`). Data lives in `~/Library/Application Support/trueforge/`.
+- MCP servers are registered under **Settings → Connectors**, or `PUT /api/v1/settings/mcp-servers`. They're remote only; the transport (SSE or streamable HTTP) is auto-detected.
+- **Shielding is per agent:** `mcp_servers[].require_approval_for_tools`. The default is `["@destructive"]`, but postgres-mcp's tools have no annotations, so the default would **never** pause `execute_sql`. We use `["@all"]` on the revoker.
+- **Local sandbox network allowlist is hard-coded** (PyPI and GitHub only), with no env var to change it. The sandbox can't reach the DB, and a throwaway Postgres inside it fails because macOS limits socket paths to 104 characters and the sandbox path is 114. That's why the dry run is a Python simulation (Phase 5).
+- Model access: an Anthropic provider is configured in Settings on Arhan's laptop. Each teammate uses their own API key.
 
 ## 6. Repository
 
 - **GitHub:** https://github.com/arenforge/bouncer-the-access-reviewer-agent
-- **Local path:** `~/Desktop/bouncer/bouncer-the-access-reviewer-agent` on Arhan's laptop (originally planned for `~/projects/…`, because macOS blocked Terminal from reading Desktop with "Operation not permitted"). Use the editor's built-in terminal, or grant Terminal "Files & Folders → Desktop" or "Full Disk Access" in System Settings.
+- **Arhan's local path:** `~/Desktop/bouncer/bouncer-the-access-reviewer-agent`. If Terminal gets "Operation not permitted" on Desktop, use the editor's terminal or grant Full Disk Access.
 
-Intended structure:
 ```
-bouncer-the-access-reviewer-agent/
-├── CLAUDE.md               ← this file
-├── README.md               ← what it does, how to run it
-├── docker-compose.yml      ← Postgres
-├── db/seed.sql             ← fake company data + governance tables
-├── agent/instructions.md   ← agent instructions (source of truth; pasted into TrueForge)
-├── agent/mcp-config.md     ← how the two MCP servers are registered
-├── scripts/                ← generated revoke scripts saved for the demo
-└── demo/                   ← demo script, screenshots, recordings
-```
-
-**TrueForge stores the agent locally on one laptop (the demo laptop).** The repo is the source of truth: edit `agent/instructions.md` in Git, then paste the latest version into TrueForge.
-
-### Team workflow
-- Everyone: `git pull` → edit only your own files → `git add` → `git commit -m "…"` → `git push`. On a rejected push: `git pull --rebase && git push`.
-- Suggested roles for four people:
-  - lead: TrueForge, MCP and `agent/`,
-  - second: `db/seed.sql`,
-  - third: `scripts/`, testing and README,
-  - fourth: `demo/`, recording and posts.
-- Never commit real secrets. All credentials in this project are fake demo values.
-
-## 7. docker-compose.yml
-
-```yaml
-services:
-  db:
-    image: postgres:16
-    container_name: bouncer-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: company
-    ports:
-      - "5433:5432" # 5433 on the host so it never clashes with a local Postgres on 5432
-    volumes:
-      - ./db/seed.sql:/docker-entrypoint-initdb.d/seed.sql
+├── CLAUDE.md                   ← this file
+├── README.md                   ← TODO (Teammate 3)
+├── docker-compose.yml          ← DB + reader + revoker, localhost-only
+├── db/seed.sql                 ← fake company data + governance tables (answer key below)
+├── agent/instructions.md       ← agent prompt, the source of truth (text below the --- line)
+├── agent/mcp-config.md         ← MCP and shielding setup, with the gotchas we hit
+├── scripts/setup-trueforge.sh  ← registers MCP servers + creates/updates the agent from instructions.md
+├── scripts/                    ← saved revoke/rollback scripts from runs (TODO)
+└── demo/                       ← demo script, screenshots, recordings (TODO)
 ```
 
-The seed runs only on first start with an empty volume. After editing `seed.sql`, run `docker compose down -v && docker compose up -d`.
+**To change the agent:** edit `agent/instructions.md`, commit, then run `./scripts/setup-trueforge.sh`. It pushes the instructions into TrueForge and is safe to re-run.
 
-## 8. db/seed.sql (current version)
+**Team workflow:** `git pull` → edit only your own files → commit → `git push` (on rejection: `git pull --rebase && git push`). Never commit real secrets. Every credential here is a fake demo value.
 
-Contents: a fake company with `customers`, `payments` and `reports` tables; nine login roles; grants; and a `governance` schema with `hr_roster`, `access_usage` and `service_dependencies`.
+## 7. Seed data and the answer key
 
-### Expected findings (the "answer key" for testing the agent)
+`db/seed.sql` creates `customers`, `payments` and `reports`; nine login roles with grants; and `governance.hr_roster` (8 rows), `governance.access_usage` (25 rows) and `governance.service_dependencies` (2 rows). All dates are relative (`CURRENT_DATE - n`), so the answer key holds on any day. The seed only runs on a fresh volume: after editing it, run `docker compose down -v && docker compose up -d`.
 
 | Role | Situation | Correct outcome |
 |---|---|---|
-| `intern_2023` | Left 425 days ago. Has SELECT/INSERT/UPDATE on payments, last used 412–430 days ago | **Revoke all** |
-| `ravi` | Left 200 days ago. SELECT on customers and payments, last used 205–210 days ago | **Revoke all** |
-| `test_final_2` | **SUPERUSER**, no usage rows, **not in HR roster** (no owner) | **Revoke** (`ALTER ROLE … NOSUPERUSER NOLOGIN`). Highest risk |
-| `svc_legacy_reports` | Service account, owner `ravi` has left, unused 97 days, **no dependencies** | **Revoke all** |
-| `priya` | Active employee, has DELETE on payments that she has **never used** | **Revoke only DELETE** (over-privileged) |
-| `svc_payments_sync` | Unused 91 days, **but** `payments-reconciliation` (critical, quarterly, next run soon) depends on it | **HOLD, do not revoke.** Blast-radius catch; explain why it looks stale |
-| `alice`, `bob`, `svc_etl` | Active, recently used | **Keep** |
+| `test_final_2` | SUPERUSER, no usage rows, not in HR roster | **Revoke:** `ALTER ROLE … NOSUPERUSER NOLOGIN`. Highest risk. |
+| `intern_2023` | Left 425 days ago; SELECT/INSERT/UPDATE on payments, last used 412–430 days ago | **Revoke all** |
+| `ravi` | Left 200 days ago; SELECT on customers and payments | **Revoke all** |
+| `svc_legacy_reports` | Service account whose owner (`ravi`) left; ALL on reports + SELECT on payments; unused 97 days; no dependencies | **Revoke all** |
+| `priya` | Active; DELETE on payments never used | **Revoke DELETE only** |
+| `svc_payments_sync` | Unused 91 days, **but** `payments-reconciliation` (critical, quarterly, next run soon) depends on it | **HOLD.** The key demo moment. |
+| `alice`, `bob`, `svc_etl` | Active; every grant has recent usage | **Keep** |
 
-`svc_payments_sync` is the key demo moment: the agent must notice that "unused for 91 days" is explained by a quarterly schedule, and hold it for human review.
+Expected final grants after a correct run: alice (customers, payments: INSERT/SELECT/UPDATE), bob (payments, reports: SELECT), priya (payments: INSERT/SELECT/UPDATE), svc_etl (customers, payments: SELECT; reports: INSERT/SELECT), svc_payments_sync (payments: SELECT/UPDATE). `test_final_2` ends with `rolsuper=f`, `rolcanlogin=f`.
 
-### Full file
-
-```sql
--- Bouncer demo database: a fake company with stale access to clean up.
--- All names, passwords and data are fictional.
-
--- 1. Application tables
-CREATE TABLE customers (
-  id    SERIAL PRIMARY KEY,
-  name  TEXT NOT NULL,
-  email TEXT NOT NULL
-);
-
-CREATE TABLE payments (
-  id          SERIAL PRIMARY KEY,
-  customer_id INT REFERENCES customers(id),
-  amount      NUMERIC(10,2) NOT NULL,
-  status      TEXT NOT NULL,
-  created_at  TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE reports (
-  id         SERIAL PRIMARY KEY,
-  title      TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
-INSERT INTO customers (name, email) VALUES
-  ('Asha Traders', 'billing@asha.example'),
-  ('Blue Kite Labs', 'finance@bluekite.example'),
-  ('Coral Foods', 'accounts@coral.example');
-
-INSERT INTO payments (customer_id, amount, status) VALUES
-  (1, 12500.00, 'settled'),
-  (2, 4800.50, 'pending'),
-  (3, 990.00, 'settled');
-
-INSERT INTO reports (title) VALUES
-  ('Monthly revenue'),
-  ('Churn summary');
-
--- 2. Database roles
-CREATE ROLE alice              LOGIN PASSWORD 'demo';
-CREATE ROLE bob                LOGIN PASSWORD 'demo';
-CREATE ROLE priya              LOGIN PASSWORD 'demo';
-CREATE ROLE intern_2023        LOGIN PASSWORD 'demo';
-CREATE ROLE ravi               LOGIN PASSWORD 'demo';
-CREATE ROLE test_final_2       LOGIN SUPERUSER PASSWORD 'demo';
-CREATE ROLE svc_etl            LOGIN PASSWORD 'demo';
-CREATE ROLE svc_legacy_reports LOGIN PASSWORD 'demo';
-CREATE ROLE svc_payments_sync  LOGIN PASSWORD 'demo';
-
--- 3. Grants
-GRANT SELECT, INSERT, UPDATE         ON payments, customers TO alice;
-GRANT SELECT                         ON reports, payments   TO bob;
-GRANT SELECT, INSERT, UPDATE, DELETE ON payments            TO priya;
-GRANT SELECT, INSERT, UPDATE         ON payments            TO intern_2023;
-GRANT SELECT                         ON customers, payments TO ravi;
-GRANT SELECT                         ON customers, payments, reports TO svc_etl;
-GRANT INSERT                         ON reports             TO svc_etl;
-GRANT ALL                            ON reports             TO svc_legacy_reports;
-GRANT SELECT                         ON payments            TO svc_legacy_reports;
-GRANT SELECT, UPDATE                 ON payments            TO svc_payments_sync;
-
--- 4. Governance data the agent cross-checks
-CREATE SCHEMA governance;
-
-CREATE TABLE governance.hr_roster (
-  username          TEXT PRIMARY KEY,
-  full_name         TEXT,
-  team              TEXT,
-  employment_status TEXT NOT NULL CHECK (employment_status IN ('active', 'left', 'service_account')),
-  left_on           DATE,
-  owner             TEXT
-);
-
-INSERT INTO governance.hr_roster VALUES
-  ('alice',              'Alice Menon',       'Payments',  'active',          NULL,               NULL),
-  ('bob',                'Bob Dsouza',        'Finance',   'active',          NULL,               NULL),
-  ('priya',              'Priya Rao',         'Payments',  'active',          NULL,               NULL),
-  ('intern_2023',        'Summer Intern',     'Payments',  'left',            CURRENT_DATE - 425, NULL),
-  ('ravi',               'Ravi Kumar',        'Analytics', 'left',            CURRENT_DATE - 200, NULL),
-  ('svc_etl',            'ETL pipeline',      'Analytics', 'service_account', NULL,               'alice'),
-  ('svc_legacy_reports', 'Old reporting job', 'Analytics', 'service_account', NULL,               'ravi'),
-  ('svc_payments_sync',  'Payments sync',     'Payments',  'service_account', NULL,               'bob');
-
-CREATE TABLE governance.access_usage (
-  username    TEXT NOT NULL,
-  object_name TEXT NOT NULL,
-  privilege   TEXT NOT NULL,
-  last_used   DATE
-);
-
-INSERT INTO governance.access_usage VALUES
-  ('alice',              'payments',  'SELECT', CURRENT_DATE - 1),
-  ('alice',              'payments',  'INSERT', CURRENT_DATE - 2),
-  ('alice',              'payments',  'UPDATE', CURRENT_DATE - 3),
-  ('alice',              'customers', 'SELECT', CURRENT_DATE - 1),
-  ('alice',              'customers', 'INSERT', CURRENT_DATE - 6),
-  ('alice',              'customers', 'UPDATE', CURRENT_DATE - 8),
-  ('bob',                'reports',   'SELECT', CURRENT_DATE - 5),
-  ('bob',                'payments',  'SELECT', CURRENT_DATE - 2),
-  ('priya',              'payments',  'SELECT', CURRENT_DATE - 1),
-  ('priya',              'payments',  'INSERT', CURRENT_DATE - 4),
-  ('priya',              'payments',  'UPDATE', CURRENT_DATE - 10),
-  ('priya',              'payments',  'DELETE', NULL),
-  ('intern_2023',        'payments',  'SELECT', CURRENT_DATE - 412),
-  ('intern_2023',        'payments',  'INSERT', CURRENT_DATE - 412),
-  ('intern_2023',        'payments',  'UPDATE', CURRENT_DATE - 430),
-  ('ravi',               'customers', 'SELECT', CURRENT_DATE - 205),
-  ('ravi',               'payments',  'SELECT', CURRENT_DATE - 210),
-  ('svc_etl',            'payments',  'SELECT', CURRENT_DATE),
-  ('svc_etl',            'customers', 'SELECT', CURRENT_DATE),
-  ('svc_etl',            'reports',   'SELECT', CURRENT_DATE),
-  ('svc_etl',            'reports',   'INSERT', CURRENT_DATE),
-  ('svc_legacy_reports', 'reports',   'SELECT', CURRENT_DATE - 97),
-  ('svc_legacy_reports', 'payments',  'SELECT', CURRENT_DATE - 97),
-  ('svc_payments_sync',  'payments',  'SELECT', CURRENT_DATE - 91),
-  ('svc_payments_sync',  'payments',  'UPDATE', CURRENT_DATE - 91);
-
-CREATE TABLE governance.service_dependencies (
-  account     TEXT NOT NULL,
-  service     TEXT NOT NULL,
-  description TEXT,
-  schedule    TEXT,
-  criticality TEXT CHECK (criticality IN ('low', 'medium', 'high', 'critical'))
-);
-
-INSERT INTO governance.service_dependencies VALUES
-  ('svc_etl',           'daily-analytics-load',    'Loads payments and customers into the analytics warehouse', 'daily',                     'medium'),
-  ('svc_payments_sync', 'payments-reconciliation', 'Reconciles payments with the bank every quarter',          'quarterly (next run soon)', 'critical');
-```
-
-## 9. Commands
-
-### Prerequisites (Docker Desktop must be open and show "Engine running")
-```
-docker pull postgres:16
-docker pull crystaldba/postgres-mcp
-brew install libpq && brew link --force libpq
-```
+## 8. Commands
 
 ### Start (any laptop)
+Needs Docker Desktop ("Engine running"), Node 22+, and your own Anthropic API key.
 ```
-cd ~/Desktop/bouncer/bouncer-the-access-reviewer-agent   # or wherever you cloned it
-docker compose up -d                                      # DB + reader + revoker, all on 127.0.0.1
-OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge   # separate terminal
-# In TrueForge Settings, add a model provider with YOUR OWN API key (first time only)
-./scripts/setup-trueforge.sh                              # registers MCP servers, creates/updates the bouncer agent
+git clone https://github.com/arenforge/bouncer-the-access-reviewer-agent.git && cd bouncer-the-access-reviewer-agent
+docker compose up -d                                                   # DB + reader + revoker
+OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]' npx @truefoundry/trueforge  # separate terminal, leave running
+# First time only: TrueForge → Settings → add a model provider with your own API key
+./scripts/setup-trueforge.sh                                           # creates the "bouncer" agent
 ```
-Register in TrueForge: reader at `http://localhost:8000/sse`, and revoker at `http://localhost:8001/sse` (**Shielded**). postgres-mcp only supports `stdio` and `sse`, so SSE it is. `--sse-host=0.0.0.0` is required, or the server binds to localhost inside the container and is unreachable. TrueForge must be started with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'` or it rejects localhost MCP URLs. Full steps: `agent/mcp-config.md`.
+Then in TrueForge: Agents → bouncer → new chat → *"Review database access and propose a cleanup."*
 
-### Maintenance
+### Reset between runs (a run really revokes access)
 ```
-docker logs bouncer-db | bouncer-reader | bouncer-revoker
-docker compose down -v && docker compose up -d        # reset DB after seed changes
-docker compose restart reader revoker                  # after a DB reset
-docker compose up -d --force-recreate reader            # recreate an MCP container
-docker exec -it bouncer-db psql -U postgres -d company # DB shell (\q to exit)
+docker compose down -v && docker compose up -d
 ```
 
-### Dry-run pattern (sandbox)
+### Checks
 ```
-psql postgresql://postgres:postgres@localhost:5433/company -v ON_ERROR_STOP=1 <<'SQL'
-BEGIN;
--- revoke statements here
--- verification queries here (e.g. \dp payments, SELECT rolsuper FROM pg_roles WHERE rolname='test_final_2')
-ROLLBACK;
-SQL
+docker compose ps
+psql postgresql://postgres:postgres@localhost:5433/company      # or: docker exec -it bouncer-db psql -U postgres -d company
+curl -N --max-time 2 http://localhost:8000/sse                  # should print "event: endpoint"
+docker logs bouncer-reader                                      # same for bouncer-db, bouncer-revoker
 ```
 
 ### Stop
@@ -316,64 +146,52 @@ SQL
 docker compose down
 ```
 
-## 10. Current status (as of the morning of 26 Sep)
+## 9. What broke and what surprised us (build-story material)
 
-- [x] TrueForge installed and running locally
-- [x] Repo created on GitHub and cloned to `~/projects/…`
-- [x] `docker-compose.yml` and `db/seed.sql` committed (fixed: stray heredoc lines removed, host port moved to 5433, usage rows added so alice/svc_etl stay "keep")
-- [x] Docker Desktop running; `docker compose up -d` succeeds; seed verified against the answer key
-- [x] Both MCP containers running (with `--sse-host=0.0.0.0`)
-- [x] Dry-run pattern verified with psql (`BEGIN … ROLLBACK` leaves the DB unchanged)
-- [x] TrueForge restarted with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost"]'`
-- [x] MCP servers registered in TrueForge; agent `bouncer` created with reader (no approval) and revoker (Shielded, `@all`)
-- [x] Agent instructions written in `agent/instructions.md`
-- [ ] Instructions pasted into TrueForge
-- [ ] First full end-to-end run
-- [ ] Revoke scripts saved to `scripts/`
-- [ ] README
-- [ ] Demo recording of the approval pause
+1. **The committed compose and seed files contained the shell commands used to create them** (`cat > … << 'EOF'`). Neither would parse. We fixed them by hand.
+2. **A local Homebrew Postgres already held port 5432,** so the Docker DB moved to 5433.
+3. **The seed contradicted its own answer key.** Alice and svc_etl had grants with no usage rows, so a correct agent would have flagged them. We added usage rows.
+4. **postgres-mcp binds to localhost inside its container** by default, which made it unreachable through Docker's port mapping. Fixed with `--sse-host=0.0.0.0`. It also only speaks SSE.
+5. **TrueForge's SSRF guard blocked `localhost` MCP URLs.** Fixed with `OUTBOUND_URL_ALLOWED_HOSTS`. The first attempt to restart TrueForge with it was blocked by Claude Code's own safety check as a "security weaken" change, so Arhan made that call himself.
+6. **The first run hit "Operation not permitted" on the dry run.** The sandbox can't reach the database by design. The agent **stopped and asked instead of faking the dry run**, which is the behaviour we wanted. We redesigned the dry run as a sandbox lint and simulation that also proves the rollback script.
+7. **postgres-mcp tools carry no annotations,** so TrueForge's default `@destructive` approval rule would never have paused a REVOKE. We shield with `@all`.
+8. **Blast-radius review of our own agent:** the containers were first published on `0.0.0.0`, which would have exposed an unauthenticated superuser SQL endpoint to the venue Wi-Fi. They're now bound to `127.0.0.1`.
+
+## 10. Current status
+
+- [x] DB, reader and revoker running; seed verified against the answer key
+- [x] MCP servers registered; agent `bouncer` created; revoker shielded (`@all`)
+- [x] Instructions rewritten against the official rubric and loaded into TrueForge
+- [x] **First full end-to-end run passed** (session `01m3e4fd1e23s3v8nqkjjaes9k`, about 11:25 IST): scan via reader → sandbox analysis → scripts → `LINT PASSED: 7 statements` / `ROLLBACK VERIFIED` / `DRY RUN PASSED` → ask-user-question "Yes, revoke" → TrueForge `tool.approval_required` shield → approved → revoker executed → reader verified. **Final DB state matches the answer key exactly,** including the `svc_payments_sync` HOLD.
+- [x] One-command setup for any laptop (`docker compose up -d` + `scripts/setup-trueforge.sh`)
+- [ ] **Arhan's laptop:** switch the old `docker run` containers (still on `0.0.0.0`) to compose: `docker rm -f bouncer-reader bouncer-revoker && docker compose down -v && docker compose up -d && ./scripts/setup-trueforge.sh`. This also resets the DB, which is currently in its post-revoke state.
+- [ ] Save that run's `revoke-plan.sql` and `rollback-plan.sql` into `scripts/` (downloadable from the session's sandbox files)
+- [ ] README (Teammate 3)
+- [ ] Recording of a clean run, including both approval pauses (Teammate 3)
+- [ ] A second run on a teammate's laptop from a fresh clone (proves "working software")
 
 ## 11. Next tasks, in order
 
-1. **Get the database and MCP servers running** and verify with `docker ps` and the check queries.
-2. **Register both MCP servers in TrueForge.** Test: *"Using the reader, list every role and its grants."*
-3. **Write `agent/instructions.md`.** It should tell the agent to:
-   - use only the **reader** for investigation,
-   - query `pg_roles`, `information_schema.role_table_grants` (or `\dp`-equivalent queries), and the three `governance` tables,
-   - apply the rules: flag access unused for 90+ days, never used, belonging to people who've left, ownerless (not in roster), superuser without an owner, or over-privileged (a privilege never used),
-   - for every candidate, check `governance.service_dependencies`, and **hold** anything with a dependency, explaining why it looks stale (for example, a quarterly schedule),
-   - produce a least-privilege plan as a table: role, privilege/object, reason, last used, blast radius, decision (revoke or hold),
-   - generate a single revoke SQL script (REVOKE statements; `ALTER ROLE … NOSUPERUSER NOLOGIN` for `test_final_2`), save it to `scripts/`, and **dry-run it in the sandbox inside `BEGIN … ROLLBACK`** with psql, reporting the result,
-   - then **stop and ask for approval** ("ask user questions"), showing counts (for example, "N changes ready, 1 held"),
-   - only after an explicit yes, execute through the **shielded revoker**, then re-query with the reader to verify and report,
-   - never revoke from `postgres`, and never touch the `governance` schema or application data.
-4. **Run it end to end once**, compare against the answer key in section 8, and fix instructions or seed as needed. Write down what broke; it's material for the build-story post.
-5. **Polish:** clear per-grant reasons, a clean approval summary, and the held payments row.
-6. **README:** problem, architecture diagram, how to run, safety design (read-only reader, shielded revoker, sandbox dry run), and the answer key.
-7. **Stretch, only if everything works:** GitHub MCP so the agent opens a pull request with the revoke script (a second real system plus an audit trail).
-8. **Last hour: freeze features.** Record the approval moment and practise a 2-minute demo: problem → scan → blast-radius catch → dry run → pause → approve → verify.
+1. **Reset Arhan's laptop to the compose setup** (the command in section 10) and do a second run to confirm it's repeatable.
+2. **Fresh-clone test on a teammate's laptop** using only section 8. Fix anything that trips them up; that's the README's job too.
+3. **README:** problem, architecture (section 4), how to run (section 8), safety design (read-only reader, isolated sandbox, two approval gates, localhost-only, rollback script), answer key, what broke (section 9), and AI-assistant disclosure.
+4. **Save demo artefacts** to `scripts/` and `demo/`: the revoke and rollback scripts, and screenshots of the diff table, `DRY RUN PASSED`, the approval question and the shield prompt.
+5. **Stretch, only if everything works:** GitHub MCP so the agent opens a PR with the revoke script (a second real system plus an audit trail).
+6. **Last hour: freeze features.** Rehearse a timed 5-minute demo: problem → scan → blast-radius catch (`svc_payments_sync`) → sandbox dry run → the agent asks → the harness shield → approve → verify → how to undo. Everyone must be able to explain the architecture.
 
 ## 12. Guardrails for anyone (human or AI) working on this repo
 
 - Keep all data fictional. Never add real credentials, real names or real company data.
-- Don't expose TrueForge or the databases beyond localhost.
-- Don't weaken the safety design. The revoker stays shielded, the reader stays restricted, and dry runs always use `ROLLBACK`.
-- Prefer the simplest thing that runs end to end. "It actually runs" is worth 25 points.
+- Keep TrueForge, the DB and the MCP servers on localhost (`127.0.0.1` port bindings).
+- Don't weaken the safety design: the revoker stays shielded with `@all`, the reader stays restricted, the sandbox stays isolated, and the agent never executes without `DRY RUN PASSED` and a human yes.
+- Prefer the simplest thing that runs end to end.
 - Commit small and often, with clear messages.
 
-## 13. Build-story context (the LinkedIn community prize)
+## 13. Build-story context (the community prize)
 
-- Prizes: ₹50,000 and ₹25,000 for the best public build stories (LinkedIn post, X thread, blog or demo video) explaining **what you built, how you wired it, and what surprised you.** A varied series beats one polished post.
+- Prizes: ₹50,000 and ₹25,000 for the best public build stories (LinkedIn post, X thread, blog or demo video): **what you built, how you wired it, what surprised you.** A varied series beats one polished post.
 - Tag TrueFoundry and Polaris School of Technology on LinkedIn (@truefoundry and @polariscodes on X). Hashtags: **#agentsthatact** #truefoundry #polarisschooloftechnology.
-- Post 1 (published) introduced the idea with the hook above.
-- Planned next posts:
-  - the wiring (architecture diagram from section 4),
-  - what broke and what surprised you, with a screen recording of the approval pause,
-  - a reflection after results.
-- During the build, capture:
-  - team photos,
-  - a screenshot of the flagged grants,
-  - the revoke script diff,
-  - **a screen recording of the "waiting for approval" moment**,
-  - one memorable error message.
+- Post 1 (published): the idea and the hook.
+- Next posts: the wiring (section 4 diagram); what broke and what surprised us (section 9, especially #6: the agent refused to fake its dry run); a reflection after results.
+- Capture: team photos, the diff table, the revoke script, `DRY RUN PASSED`, **a screen recording of both approval pauses**, one memorable error (`Outbound URL blocked for host "localhost"` or the sandbox's `Operation not permitted`).
 - Be honest in posts. Only describe things that really happened.
