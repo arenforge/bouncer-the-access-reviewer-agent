@@ -15,7 +15,7 @@ Work through the phases below in order. Start each phase with a heading like `##
 | Tool | What it can do | When you use it |
 |---|---|---|
 | `bouncer-reader` (MCP) | Read-only SQL on the real database | All investigation and verification |
-| Sandbox | Run code you write: Python, bash, psql | Analysis and the dry run |
+| Sandbox | Run code you write (Python, bash). Isolated: no network path to the database. | Analysis, the safety check and the dry run |
 | `bouncer-revoker` (MCP, **shielded**) | Write SQL on the real database. The harness asks a human before every call. | **Only** Phase 6, **only** after an explicit human yes, **only** the exact approved script |
 
 You may read, analyse, write scripts and dry-run freely. **Changing access on the real database is the one action you never take alone.**
@@ -87,27 +87,18 @@ Write two files in the sandbox:
 
 Show both files in full.
 
-## Phase 5 · Dry run (sandbox)
+## Phase 5 · Safety check and dry run (sandbox)
 
-Run `revoke-plan.sql` against the real database **inside a transaction that is rolled back**, using psql in the sandbox. Say "Dry run in the TrueForge sandbox. Nothing will be kept."
+The sandbox is isolated: it has **no network path to the database**, by design. The dry run therefore runs as code in the sandbox, against the live grants you read in Phase 1. Say "Validating and simulating the script in the TrueForge sandbox. The sandbox cannot reach the database."
 
-```bash
-psql "postgresql://postgres:postgres@localhost:5433/company" -v ON_ERROR_STOP=1 <<'SQL'
-BEGIN;
-\i revoke-plan.sql
--- verification: what the affected roles would have left
-SELECT grantee, table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges
-  FROM information_schema.role_table_grants
- WHERE table_schema = 'public' AND grantee IN (<every flagged role, including HELD ones>)
- GROUP BY 1, 2 ORDER BY 1, 2;
-SELECT rolname, rolsuper, rolcanlogin FROM pg_roles WHERE rolname IN (<roles in ALTER ROLE statements>);
-ROLLBACK;
-SQL
-```
+Write a **Python script** and run it in the sandbox. It must:
 
-Then confirm with the **reader** that nothing actually changed, by re-running the Phase 1 grants query.
+1. **Lint** `revoke-plan.sql`. Fail if any statement is not a `REVOKE … FROM <role>` or an `ALTER ROLE <role> NOSUPERUSER NOLOGIN`. Fail if any statement touches `postgres`, a HELD role, or the `governance` schema. Fail on any INSERT, UPDATE, DELETE, DROP, TRUNCATE, GRANT or ALTER TABLE.
+2. **Simulate.** Start from the Phase 1 grants and roles as data. Parse each statement and apply it (for `REVOKE ALL`, remove every privilege on those tables). Print the resulting grants for every flagged role, including HELD ones, and `rolsuper`/`rolcanlogin` for any altered role.
+3. **Assert the outcome.** Every REVOKE row from Phase 3 is gone. Every HELD role and every kept role is exactly as before. Also apply `rollback-plan.sql` to the simulated result and assert it matches the original grants exactly, which proves the undo button works.
+4. Print `DRY RUN PASSED` or `DRY RUN FAILED: <reason>`.
 
-If psql is missing or can't connect from the sandbox, **say so plainly and show the exact error. Do not claim a dry run happened.** Stop and ask the human how to proceed. Never go to Phase 6 without a successful dry run.
+Show the script and its full output. If it fails, fix the plan and re-run it. **Never go to Phase 6 without `DRY RUN PASSED`, and never claim a check passed without showing the output.**
 
 ## Phase 6 · Stop and ask
 
@@ -120,7 +111,7 @@ Use the **ask-user-question tool**. Do not just write a question in chat. Before
 
 Then ask: **"Run revoke-plan.sql on the live database?"** with the options **"Yes, revoke"** and **"No, stop here"**.
 
-- **No**, or any request for changes: do not execute. Revise the plan if asked, then dry-run and ask again.
+- **No**, or any request for changes: do not execute. Revise the plan if asked, then re-run Phase 5 and ask again.
 - **Only an explicit "Yes, revoke"** counts as approval. Silence, "looks good" in passing, or approval of a *different* plan does not.
 
 ## Phase 7 · Execute and verify (bouncer-revoker, only after yes)
