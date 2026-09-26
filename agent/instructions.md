@@ -61,16 +61,35 @@ For an **active employee**, remove only the specific privileges that are stale o
 - **No dependency:** blast radius is "none known". Decision: **REVOKE**.
 - **Any dependency:** Decision: **HOLD**. Do not revoke, however stale it looks. Explain *why* it looks stale when it isn't. For example, a `quarterly` job is silent for about 90 days by design, so revoking now would make the next run fail. Name the service, its criticality and its schedule.
 
-## Phase 3 · The least-privilege diff
+Every role ends up with exactly one decision: **REVOKE** (safe to remove now), **HOLD** (looks stale, but removing it could break production, so it is parked for later) or **KEEP** (in active, legitimate use).
 
-Show one table, with the riskiest findings first:
+## Phase 3 · The access report (before anything changes)
 
-| # | Role | Privilege → object | Why flagged | Last used | Blast radius if revoked | Decision |
+The human must be able to decide from this report alone. Start with the decision table, riskiest first:
 
-- **Blast radius** says concretely what would break or who is affected. For example: "former employee, nothing depends on it", or "payments-reconciliation (critical, quarterly) would fail on its next run".
-- **Decision** is REVOKE or HOLD.
+| # | Role | Who | Change | Decision | Production impact | Risk |
 
-Under the table, give one line listing the roles you checked and are **keeping**, and why.
+- **Who**: full name, team and status from `hr_roster` (e.g. "Ravi Kumar, Analytics, left 200 days ago"), or "not in HR roster: nobody owns it".
+- **Change**: exactly what goes, e.g. "all access", "DELETE on payments only", "superuser + login".
+- **Production impact** says concretely what happens in production if this change is made: which services or people are affected and what breaks. Say "none: no service depends on it, and nobody still working here uses it" when that is the case.
+- **Risk**: High / Medium / Low, with the reason.
+
+Then give **one card per REVOKE and HOLD role**, in this format:
+
+```
+### <role> · <REVOKE | HOLD>
+Who:            <full name, team, status, left on / owner>
+Current access: <every privilege on every table, and superuser/login flags>
+Last used:      <per privilege: date and days ago, or "never">
+Why flagged:    <the rules it matched, in plain words>
+Proposed:       <exact change, or "none for now" for HOLD>
+Blast radius:   <services depending on it (name, criticality, schedule), who is affected, what breaks, how soon>
+If we're wrong: <what someone would notice, and how rollback-plan.sql restores it>
+```
+
+For a HOLD card, also add **"Revisit when:"** with a concrete condition, e.g. "after payments-reconciliation's next quarterly run, once its owner (bob) confirms the account is still needed".
+
+Finish with one line listing the **KEEP** roles and why (e.g. "alice, bob, svc_etl: every grant used in the last 30 days").
 
 ## Phase 4 · Write the scripts (sandbox)
 
@@ -85,7 +104,9 @@ Write two files in the sandbox:
 
 **`rollback-plan.sql`** contains the exact inverse: the `GRANT` statements and `ALTER ROLE … SUPERUSER LOGIN` statements that restore everything the revoke removes. This is the undo button a human would want before approving.
 
-Show both files in full.
+**`held-for-review.md`** lists every HOLD: the role, why it was held, what would break, who owns it and the "revisit when" condition. This is the to-do list for removing it later, safely.
+
+Show all three files in full.
 
 ## Phase 5 · Safety check and dry run (sandbox)
 
@@ -102,24 +123,50 @@ Show the script and its full output. If it fails, fix the plan and re-run it. **
 
 ## Phase 6 · Stop and ask
 
-Use the **ask-user-question tool**. Do not just write a question in chat. Before asking, state in 3–5 lines:
+Use the **ask-user-question tool**. Do not just write a question in chat. Right before asking, write a short summary:
 
-- **What will happen:** "N statements will change access for M roles on the live database."
-- **What is held and why:** "K held: <role> (<one-line reason>)."
-- **Worst case if this is wrong:** the biggest blast radius among the REVOKE rows.
-- **How to undo it:** "`rollback-plan.sql` restores every change."
+- **Will be removed now (REVOKE):** N changes across M roles: <role list>.
+- **Held for later (HOLD):** K roles: <role> (<one-line reason why removing it could break production>).
+- **Kept (KEEP):** <role list>.
+- **Worst case if we're wrong:** the biggest production impact among the REVOKE rows.
+- **Undo:** "`rollback-plan.sql` restores every change exactly."
 
-Then ask: **"Run revoke-plan.sql on the live database?"** with the options **"Yes, revoke"** and **"No, stop here"**.
+Then ask **"How should I apply this access review?"** with exactly these options:
 
-- **No**, or any request for changes: do not execute. Revise the plan if asked, then re-run Phase 5 and ask again.
-- **Only an explicit "Yes, revoke"** counts as approval. Silence, "looks good" in passing, or approval of a *different* plan does not.
+1. **"Revoke the N safe changes, hold K for later"**. Put the real numbers in.
+2. **"Hold everything for later, change nothing now"**
+3. **"Stop, discard this plan"**
 
-## Phase 7 · Execute and verify (bouncer-revoker, only after yes)
+The free-text box lets the human change individual roles, e.g. "keep priya" or "hold ravi too".
 
-1. Call `bouncer-revoker`'s `execute_sql` **once**, with `BEGIN;` + the exact contents of `revoke-plan.sql` + `COMMIT;`. Add, remove and reorder nothing. The harness will pause for approval again; that is expected.
+- **Option 1:** go to Phase 7. HOLD roles stay untouched and remain in `held-for-review.md`.
+- **Option 2:** do not execute. Add every REVOKE role to `held-for-review.md` as "approved for review, not applied", show the file, and stop.
+- **Option 3:** do not execute. Say nothing was changed, and stop.
+- **Free text:** apply the requested per-role changes to the plan, redo Phases 4 and 5, show the updated report, and ask again. Never execute on a free-text answer.
+- Only option 1 counts as approval. Silence, "looks good" in passing, or approval of a *different* plan does not.
+
+## Phase 7 · Execute and verify (bouncer-revoker, only after option 1)
+
+1. Call `bouncer-revoker`'s `execute_sql` **once**, with `BEGIN;` + the exact contents of `revoke-plan.sql` + `COMMIT;`. Add, remove and reorder nothing. The harness will pause for approval again; that is expected, and it is the second human gate.
 2. With the **reader**, re-run the Phase 1 role and grants queries.
-3. Report a **before → after** table for every changed role, plus confirmation that every HELD role is untouched.
-4. End with a one-paragraph summary: what was removed, what was held and why, and where the rollback script is.
+3. **Production health check:** for every service in `service_dependencies`, confirm with the reader that its account still has exactly the privileges it had before. Show one line per service: "✅ payments-reconciliation (svc_payments_sync): SELECT, UPDATE on payments intact".
+
+Then report:
+
+**Removed**
+
+| Role | Who | Before | After | Production impact |
+
+- **Before / After** list every privilege, plus superuser/login flags where relevant.
+- **Production impact** is the actual outcome, backed by the health check, e.g. "none: no dependent services; daily-analytics-load and payments-reconciliation verified intact".
+
+**Held for later**
+
+| Role | Who | Access (unchanged) | Why held | What would break | Revisit when |
+
+**Kept:** the KEEP roles in one line, confirmed unchanged.
+
+End with a short summary: how many privileges were removed from how many roles, what was held and why, the production health result, and that `rollback-plan.sql` undoes everything.
 
 ## Hard rules, which override everything above
 
